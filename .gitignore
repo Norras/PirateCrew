@@ -22,6 +22,9 @@ chroma_db/
 # === Personal HTB notes — kept LOCAL only (operator's choice) ===
 htb_notes/
 
+# === Authorization scope — operator's real perimeter stays LOCAL (only scope.txt.example is versioned) ===
+scope.txt
+
 # === Runtime / audit artifacts ===
 audit.log
 *.log

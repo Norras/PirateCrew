@@ -1,0 +1,7 @@
+# Périmètre d'autorisation PirateCrew — copier ce fichier en scope.txt (non versionné).
+# Une entrée IP ou CIDR par ligne ; lignes vides et lignes commençant par # ignorées.
+# Sans scope.txt (ou sans aucune entrée), la mission autonome refuse de démarrer.
+#
+# Exemples (à décommenter et adapter à VOTRE lab autorisé) :
+# 10.10.10.0/24
+# 10.10.10.40
