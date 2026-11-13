@@ -33,3 +33,6 @@ audit.log
 # === OS cruft ===
 Thumbs.db
 .DS_Store
+
+# === SDD scratch (superpowers subagent-driven workspace) ===
+.superpowers/
