@@ -64,6 +64,9 @@ class Scope:
 
         Les lignes vides et les commentaires (`#`) sont ignorés. Une entrée
         invalide lève ScopeError plutôt que d'être écartée en silence.
+
+        Parsing strict : un CIDR avec des bits hôte (`10.10.10.5/24`) est
+        refusé au lieu d'être élargi au réseau entier à l'insu de l'opérateur.
         """
         networks = []
         for number, line in enumerate(lines, start=1):
@@ -71,10 +74,10 @@ class Scope:
             if not entry or entry.startswith("#"):
                 continue
             try:
-                networks.append(ipaddress.ip_network(entry, strict=False))
+                networks.append(ipaddress.ip_network(entry, strict=True))
             except ValueError as exc:
                 raise ScopeError(
-                    f"Entrée de périmètre invalide (ligne {number}) : {entry!r}"
+                    f"Entrée de périmètre invalide (ligne {number}) : {entry!r} ({exc})"
                 ) from exc
         return cls(networks)
 
