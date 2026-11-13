@@ -143,6 +143,29 @@ def node_general_response(state: MissionState):
     return {"final_response": resp.content}
 
 
+# --- Porte d'entrée de mission (scope fail-closed) -------------------------- #
+def enter_autonomous_mission(state: MissionState, config):
+    """Charge le périmètre (scope.txt), démarre la mission, affiche le périmètre.
+    Fail-closed : scope.txt absent/vide ⇒ refus net, aucune recon lancée."""
+    thread_id = ((config or {}).get("configurable", {}).get("thread_id")
+                 or state.get("thread_id") or "session_pirate_master")
+    try:
+        scope = load_scope("scope.txt")
+    except ScopeError as exc:
+        print(f"[SCOPE] Mission refusée : {exc}")
+        return {"finished": True,
+                "final_response": "Mission refusée : périmètre d'autorisation (scope.txt) absent ou vide."}
+    set_active_scope(scope)
+    start_mission(thread_id, scope)
+    print(f"[SCOPE] Périmètre chargé : {len(scope.networks)} entrée(s). Mission {thread_id!r} démarrée.")
+    return {"thread_id": thread_id, "cycle": 0, "max_cycles": state.get("max_cycles", 6),
+            "finished": False}
+
+
+def route_after_enter(state: MissionState) -> Literal["recon", "finish"]:
+    return "finish" if state.get("finished") else "recon"
+
+
 # --- 4. HELPERS DE MISSION (purs, testables sans LLM) ----------------------- #
 def _requires_satisfied(world: WorldModel, host: str, service: str, requires: set) -> bool:
     """Vrai si le modèle du terrain satisfait les prérequis d'une technique."""
@@ -339,6 +362,7 @@ master_workflow.add_node("recon", node_recon)
 master_workflow.add_node("decide", node_decide)
 master_workflow.add_node("execute", node_execute)
 master_workflow.add_node("integrate", node_integrate)
+master_workflow.add_node("enter", enter_autonomous_mission)
 
 master_workflow.add_conditional_edges(
     START,
@@ -346,9 +370,16 @@ master_workflow.add_conditional_edges(
     {
         "delegate_pirate": "delegate_pirate",
         "delegate_analyst": "delegate_analyst",
-        "autonomous_mission": "recon",
+        "autonomous_mission": "enter",
         "general_response": "general_response",
     },
+)
+
+# Porte de mission : enter → recon (périmètre OK) ou END (refus fail-closed).
+master_workflow.add_conditional_edges(
+    "enter",
+    route_after_enter,
+    {"recon": "recon", "finish": END},
 )
 
 # Boucle de la mission autonome : recon (une fois) → decide → execute → integrate → route.
@@ -378,14 +409,13 @@ if __name__ == "__main__":
 
     # Périmètre d'autorisation : fail-closed (scope.txt obligatoire pour une mission).
     # Le chargement + la porte de mission détaillée sont finalisés en Task 7.
-    _scope = None
+    # Affichage informatif du périmètre au démarrage. La porte de mission
+    # (enter_autonomous_mission) le (re)charge et l'applique, fail-closed.
     try:
-        _scope = load_scope("scope.txt")
-        set_active_scope(_scope)
-        print(f"[SCOPE] Périmètre chargé : {len(_scope.networks)} entrée(s).")
+        _scope0 = load_scope("scope.txt")
+        print(f"[SCOPE] scope.txt : {len(_scope0.networks)} entrée(s). Missions autonomes autorisées dans ce périmètre.")
     except ScopeError as exc:
-        print(f"[SCOPE] Aucun périmètre valide (scope.txt) : {exc}")
-        print("        Les missions autonomes seront refusées tant que scope.txt n'est pas fourni.")
+        print(f"[SCOPE] scope.txt absent/vide ({exc}). Les missions autonomes seront refusées.")
 
     config = {"configurable": {"thread_id": "session_pirate_master"}}
 
@@ -398,15 +428,15 @@ if __name__ == "__main__":
             if not user_input.strip():
                 continue
 
-            thread_id = "session_pirate_master"
-            if _scope is not None:
-                start_mission(thread_id, _scope)
+            # Cible = première IP mentionnée dans la requête, sinon 127.0.0.1.
+            _ipm = re.search(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", user_input)
+            target = _ipm.group(0) if _ipm else "127.0.0.1"
 
             initial_state = {
                 "question": user_input,
-                "target": "127.0.0.1",
+                "target": target,
                 "goal": user_input,
-                "thread_id": thread_id,
+                "thread_id": "session_pirate_master",
                 "cycle": 0,
                 "max_cycles": 6,
                 "discovered_services": [],
