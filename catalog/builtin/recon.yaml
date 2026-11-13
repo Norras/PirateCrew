@@ -1,0 +1,20 @@
+# Techniques builtin — reconnaissance (énumération standard, non sensible).
+- id: nmap.quick
+  name: Scan nmap rapide
+  domain: recon
+  service: "*"
+  requires: []
+  tool: nmap
+  command_template: "nmap -T4 -F {target}"
+  success_signal: "open"
+  provided_by: builtin
+
+- id: tcp.check
+  name: Test de port TCP (socket pur Python)
+  domain: recon
+  service: "*"
+  requires: []
+  tool: tcp_port_check
+  command_template: ""
+  success_signal: "OUVERT"
+  provided_by: builtin

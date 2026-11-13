@@ -1,0 +1,10 @@
+# Techniques builtin — web (fingerprint HTTP, non sensible).
+- id: http.fingerprint
+  name: Fingerprint HTTP (code + en-têtes révélateurs)
+  domain: web
+  service: http
+  requires: []
+  tool: http_fingerprint
+  command_template: ""
+  success_signal: "HTTP"
+  provided_by: builtin

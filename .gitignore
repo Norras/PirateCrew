@@ -39,3 +39,6 @@ Thumbs.db
 
 # === SDD scratch (superpowers subagent-driven workspace) ===
 .superpowers/
+
+# === Operator attack templates — real arsenal stays LOCAL (dir kept via .gitkeep) ===
+catalog/operator/*.yaml

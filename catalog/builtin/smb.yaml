@@ -1,0 +1,20 @@
+# Techniques builtin — SMB (énumération autorisée, non sensible).
+- id: smb.port_probe
+  name: Sonde des ports SMB/NetBIOS
+  domain: recon
+  service: smb
+  requires: []
+  tool: smb_port_probe
+  command_template: ""
+  success_signal: "445=OUVERT"
+  provided_by: builtin
+
+- id: smb.enum_shares
+  name: Listing des partages SMB (session nulle)
+  domain: ad
+  service: smb
+  requires: []
+  tool: smbclient
+  command_template: "smbclient -L //{target} -N"
+  success_signal: "Sharename"
+  provided_by: builtin

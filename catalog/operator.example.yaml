@@ -1,0 +1,53 @@
+# ============================================================================
+# GABARITS OPERATOR — exemple (NON chargé par le catalogue).
+#
+# Copie ce fichier (ou des entrées) dans catalog/operator/<nom>.yaml puis
+# REMPLIS toi-même les `command_template` pour tes cibles AUTORISÉES.
+# Les `command_template` sont livrés VIDES : l'arsenal offensif précis
+# t'appartient. Les fichiers réels de catalog/operator/ ne sont pas versionnés
+# (voir .gitignore : catalog/operator/*.yaml).
+#
+# Format identique aux techniques builtin. `requires` liste les prérequis que
+# le modèle du terrain doit satisfaire pour que la technique soit proposée
+# (ex. [credential] = un credential applicable doit exister).
+# ============================================================================
+
+- id: ad.kerberoasting
+  name: Kerberoasting
+  domain: ad
+  service: kerberos
+  requires: [credential]
+  tool: ""
+  command_template: "<à fournir par l'opérateur>"
+  success_signal: ""
+  provided_by: operator
+
+- id: ad.dcsync
+  name: DCSync
+  domain: ad
+  service: ldap
+  requires: [credential]
+  tool: ""
+  command_template: "<à fournir par l'opérateur>"
+  success_signal: ""
+  provided_by: operator
+
+- id: smb.pass_the_hash
+  name: Pass-the-Hash
+  domain: ad
+  service: smb
+  requires: [credential]
+  tool: ""
+  command_template: "<à fournir par l'opérateur>"
+  success_signal: ""
+  provided_by: operator
+
+- id: generic.brute_force
+  name: Brute-force d'authentification
+  domain: credentials
+  service: "*"
+  requires: []
+  tool: ""
+  command_template: "<à fournir par l'opérateur>"
+  success_signal: ""
+  provided_by: operator
