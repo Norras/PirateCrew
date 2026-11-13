@@ -1,0 +1,35 @@
+# === Secrets — NEVER commit ===
+.env
+.env.*
+*.key
+
+# === Python virtual environment ===
+venv/
+.venv/
+env/
+
+# === Python caches / build ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# === RAG vector store (generated from htb_notes, large & regenerable) ===
+chroma_db/
+
+# === Personal HTB notes — kept LOCAL only (operator's choice) ===
+htb_notes/
+
+# === Runtime / audit artifacts ===
+audit.log
+*.log
+
+# === Editor / IDE ===
+.vscode/
+.idea/
+
+# === OS cruft ===
+Thumbs.db
+.DS_Store
