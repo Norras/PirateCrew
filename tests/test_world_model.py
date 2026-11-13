@@ -31,3 +31,34 @@ def test_ledger_keyed_by_inputs():
     assert wm.is_tried("10.10.10.5", "smb", "smb.exploit", inputs_fp="") is True
     fp = inputs_fingerprint({"cred": "svc:P@ss"})
     assert wm.is_tried("10.10.10.5", "smb", "smb.exploit", inputs_fp=fp) is False
+
+
+def test_add_service_updates_name_when_first_seen_anonymously():
+    # Un port peut être remonté ouvert AVANT d'être identifié (name="") puis nommé.
+    wm = _wm()
+    wm.add_service("10.10.10.5", 445, name="")        # vu ouvert, pas encore identifié
+    svc = wm.add_service("10.10.10.5", 445, name="smb")  # identifié ensuite
+    assert svc.name == "smb"                           # le nom tardif n'est pas perdu
+    host = wm.hosts["10.10.10.5"]
+    assert len([s for s in host.services if s.port == 445]) == 1  # toujours dédupliqué
+    assert "smb" in {s.name for s in host.services if s.name}
+
+
+def test_add_service_fills_version_on_existing():
+    wm = _wm()
+    wm.add_service("10.10.10.5", 445, name="smb")
+    wm.add_service("10.10.10.5", 445, name="smb", version="Samba 4.x")
+    svc = next(s for s in wm.hosts["10.10.10.5"].services if s.port == 445)
+    assert svc.version == "Samba 4.x"
+
+
+def test_out_of_scope_host_trace_escapes_newline():
+    # conftest redirige déjà scope.AUDIT_LOG vers un tmp isolé.
+    import scope as scope_mod
+    from pathlib import Path
+    wm = _wm()
+    wm.add_host("8.8.8.8\n2026-01-01T00:00:00 | RUN | nmap -A 10.0.0.1")  # hors-scope + newline
+    audit = Path(scope_mod.AUDIT_LOG).read_text(encoding="utf-8")
+    assert audit.count("\n") == 1 and audit.endswith("\n")  # une seule ligne, pas deux
+    assert "\\n" in audit                                    # le saut de ligne est échappé
+    assert "| OUT_OF_SCOPE |" in audit

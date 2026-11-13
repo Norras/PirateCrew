@@ -29,7 +29,7 @@ from urllib.parse import urlparse
 
 from langchain_core.tools import tool
 
-from scope import assert_in_scope, ScopeError
+from scope import assert_in_scope, ScopeError, _audit_escape
 from state.world_model import WorldModel, Credential, Session
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -46,8 +46,10 @@ COMMON_PORTS = [21, 22, 25, 53, 80, 110, 139, 143, 443, 445, 3306, 3389, 5985, 8
 # Helpers internes (non exposés comme outils)
 # --------------------------------------------------------------------------- #
 def _audit(action: str, detail: str = "") -> str:
-    """Append horodaté dans audit.log. Jamais bloquant."""
-    line = f"{datetime.now().isoformat(timespec='seconds')} | {action} | {detail}\n"
+    """Append horodaté dans audit.log. Jamais bloquant. Neutralise les CR/LF
+    (action ET detail sont souvent contrôlés par l'agent) : empêche la forge
+    d'une fausse ligne d'audit."""
+    line = f"{datetime.now().isoformat(timespec='seconds')} | {_audit_escape(action)} | {_audit_escape(detail)}\n"
     try:
         with open(AUDIT_LOG, "a", encoding="utf-8") as fh:
             fh.write(line)
@@ -166,15 +168,18 @@ def http_fingerprint(url: str) -> str:
         url = "http://" + url
     parsed = urlparse(url)
     host = parsed.hostname or ""
-    _validate_target(host)  # filtre syntaxique + périmètre (lève si hors-scope)
+    ip = _validate_target(host)  # filtre + périmètre ; on contacte l'IP VÉRIFIÉE, pas le hostname
     _audit("HTTP_FINGERPRINT", url)
     is_https = parsed.scheme == "https"
     conn_cls = http.client.HTTPSConnection if is_https else http.client.HTTPConnection
     port = parsed.port or (443 if is_https else 80)
     path = parsed.path or "/"
     try:
-        conn = conn_cls(host, port, timeout=8)
-        conn.request("HEAD", path)
+        # Connexion sur l'IP validée par le périmètre (contrat scope.py : utiliser
+        # l'IP renvoyée, jamais le hostname re-résolu). Le hostname d'origine ne
+        # sert plus que d'en-tête Host, pour viser le bon vhost.
+        conn = conn_cls(ip, port, timeout=8)
+        conn.request("HEAD", path, headers={"Host": host})
         resp = conn.getresponse()
         headers = dict(resp.getheaders())
         status, reason = resp.status, resp.reason

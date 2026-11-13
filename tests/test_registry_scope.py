@@ -29,3 +29,43 @@ def test_report_finding_writes_credential():
                  "principal": "svc", "secret": "P@ss", "cred_kind": "password"})
     assert any(c.principal == "svc" for c in wm.credentials)
     assert wm.evidence  # trace brute conservée
+
+
+def test_audit_event_escapes_newline(tmp_path, monkeypatch):
+    import tools.registry as reg
+    monkeypatch.setattr(reg, "AUDIT_LOG", str(tmp_path / "audit.log"))
+    from tools.registry import log_audit_event
+    log_audit_event.invoke({"action": "note",
+                            "detail": "banner\n2026-01-01T00:00:00 | OUT_OF_SCOPE | 10.0.0.1"})
+    audit = (tmp_path / "audit.log").read_text(encoding="utf-8")
+    assert audit.count("\n") == 1 and audit.endswith("\n")  # une fausse ligne ne peut être forgée
+    assert "\\n" in audit
+
+
+def test_http_fingerprint_connects_to_validated_ip(tmp_path, monkeypatch):
+    import tools.registry as reg
+    monkeypatch.setattr(reg, "AUDIT_LOG", str(tmp_path / "audit.log"))
+    # La cible résout vers une IP in-scope ; on capture l'hôte RÉELLEMENT contacté.
+    monkeypatch.setattr(reg, "_validate_target", lambda t: "127.0.0.1")
+    captured = {}
+
+    class FakeResp:
+        status, reason = 200, "OK"
+        def getheaders(self): return [("Server", "nginx")]
+
+    class FakeConn:
+        def __init__(self, host, port, timeout=None):
+            captured["host"] = host
+            captured["port"] = port
+        def request(self, method, path, headers=None):
+            captured["path"] = path
+            captured["headers"] = headers or {}
+        def getresponse(self): return FakeResp()
+        def close(self): pass
+
+    monkeypatch.setattr(reg.http.client, "HTTPConnection", FakeConn)
+    from tools.registry import http_fingerprint
+    out = http_fingerprint.invoke({"url": "http://box.htb/admin"})
+    assert captured["host"] == "127.0.0.1"  # l'IP validée, jamais le hostname "box.htb"
+    assert captured["headers"].get("Host") == "box.htb"  # vhost préservé dans l'en-tête
+    assert "200" in out

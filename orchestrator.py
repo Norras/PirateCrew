@@ -74,16 +74,32 @@ SERVICE_DOMAIN = {
 }
 
 
+# Marqueurs qui DISQUALIFIENT une ligne « open » (port testé mais pas ouvert).
+_NEG_MARKERS = ("closed", "filtered", "none open", "no open", "0 open",
+                "not open", "aucun", "fermé", "ferme")
+_PORT_TOKEN_RE = re.compile(r"\d+")
+
+
 def _parse_services(text: str) -> List[str]:
-    """Extrait les services détectés depuis la sortie libre d'un agent de recon."""
-    low = (text or "").lower()
+    """Services OUVERTS extraits de la sortie libre d'un agent de recon.
+
+    Repli best-effort (le canal primaire reste report_finding). Ne retient que
+    les lignes signalant « open » sans marqueur de négation, et matche les ports
+    par TOKEN et non en sous-chaîne : « built 2021 », « 255.255.255.0 » ou
+    « … — none open » ne créent plus de service fantôme.
+    """
     found = set()
-    for svc in KNOWN_SERVICES:
-        if svc in low:
-            found.add(svc)
-    for port, svc in PORT_TO_SERVICE.items():
-        if port in low:
-            found.add(svc)
+    for raw_line in (text or "").splitlines():
+        low = raw_line.lower()
+        if "open" not in low or any(m in low for m in _NEG_MARKERS):
+            continue
+        tokens = set(_PORT_TOKEN_RE.findall(low))
+        for port, svc in PORT_TO_SERVICE.items():
+            if port in tokens:
+                found.add(svc)
+        for svc in KNOWN_SERVICES:
+            if svc in low:
+                found.add(svc)
     if "https" in found:
         found.add("http")
     return sorted(found)
@@ -152,6 +168,7 @@ def enter_autonomous_mission(state: MissionState, config):
     try:
         scope = load_scope("scope.txt")
     except ScopeError as exc:
+        set_active_scope(None)  # fail-closed : aucun périmètre périmé ne reste actif après un refus
         print(f"[SCOPE] Mission refusée : {exc}")
         return {"finished": True,
                 "final_response": "Mission refusée : périmètre d'autorisation (scope.txt) absent ou vide."}
@@ -183,8 +200,11 @@ def _task_inputs_fp(world: WorldModel, service: str, requires: set) -> str:
     if "credential" in requires:
         creds = world.creds_applicable(service)
         if creds:
-            c = creds[0]
-            return inputs_fingerprint({"cred": f"{c.principal}:{c.secret}"})
+            # Empreinte sur TOUS les creds applicables (triés) : un nouveau cred
+            # change l'empreinte et ré-ouvre la technique (R2), là où creds[0]
+            # seul la figeait sur le premier cred à jamais.
+            ids = sorted(f"{c.principal}:{c.secret}" for c in creds)
+            return inputs_fingerprint({"cred": ",".join(ids)})
     return ""
 
 
@@ -214,6 +234,13 @@ def plan_tasks(world: WorldModel, catalog: list) -> List[Dict[str, Any]]:
 # Motifs best-effort pour le rattrapage de trouvailles dans du texte brut (R1).
 _CRED_RE = re.compile(r"\b([A-Za-z][A-Za-z0-9._\\-]{1,63}):([^\s:/]{3,64})\b")
 _IPV4_RE = re.compile(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b")
+# Indice explicite de credential : un 'mot:valeur' n'est retenu que sur une ligne
+# qui en porte un, sinon « Server:nginx » / « Host:10.0.0.1 » fabriquent de faux
+# secrets qui débloqueraient à tort des techniques requires={credential}.
+_CRED_CUE_RE = re.compile(
+    r"\b(cred|creds|credential|credentials|password|passwd|pwd|login|logon|secret|hash|ntlm|kerb)\b",
+    re.IGNORECASE,
+)
 
 
 def reconcile_evidence(world: WorldModel, raw_text: str) -> int:
@@ -222,13 +249,18 @@ def reconcile_evidence(world: WorldModel, raw_text: str) -> int:
     nouveaux. Renvoie le nombre d'éléments ajoutés. Jamais levant."""
     text = raw_text or ""
     added = 0
-    for m in _CRED_RE.finditer(text):
-        principal, secret = m.group(1), m.group(2)
-        before = len(world.credentials)
-        world.add_credential(Credential(kind="password", principal=principal,
-                                        secret=secret, source="evidence-reconcile"))
-        if len(world.credentials) > before:
-            added += 1
+    # Credentials : uniquement depuis une LIGNE portant un indice explicite de
+    # credential (anti-fabrication depuis de la prose « mot:valeur » anodine).
+    for line in text.splitlines():
+        if not _CRED_CUE_RE.search(line):
+            continue
+        for m in _CRED_RE.finditer(line):
+            principal, secret = m.group(1), m.group(2)
+            before = len(world.credentials)
+            world.add_credential(Credential(kind="password", principal=principal,
+                                            secret=secret, source="evidence-reconcile"))
+            if len(world.credentials) > before:
+                added += 1
     for m in _IPV4_RE.finditer(text):
         ip = m.group(1)
         if ip not in world.hosts:

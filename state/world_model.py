@@ -104,6 +104,13 @@ class WorldModel:
         h = self.hosts.get(host) or self.add_host(host)
         for existing in h.services:
             if existing.port == port and existing.proto == proto:
+                # Dédup par (port, proto), mais on enrichit un service d'abord vu
+                # anonymement : un name='' initial le rendrait invisible au
+                # planificateur (plan_tasks filtre sur svc.name) — perte silencieuse.
+                if name and not existing.name:
+                    existing.name = name
+                if version and not existing.version:
+                    existing.version = version
                 return existing
         svc = Service(host=host, port=port, proto=proto, name=name, version=version)
         h.services.append(svc)
@@ -164,7 +171,7 @@ class WorldModel:
         jamais : une trace ratée ne doit pas casser l'enregistrement.
         """
         try:
-            line = f"{datetime.now().isoformat(timespec='seconds')} | OUT_OF_SCOPE | {ip}\n"
+            line = f"{datetime.now().isoformat(timespec='seconds')} | OUT_OF_SCOPE | {scope._audit_escape(ip)}\n"
             with open(scope.AUDIT_LOG, "a", encoding="utf-8") as fh:
                 fh.write(line)
         except Exception:

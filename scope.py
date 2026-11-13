@@ -21,16 +21,24 @@ class ScopeError(Exception):
     """Périmètre absent ou invalide, ou cible hors périmètre."""
 
 
+def _audit_escape(value: str) -> str:
+    """Neutralise les CR/LF d'un champ d'audit.
+
+    Une ligne par événement : une valeur contrôlée par la cible (hôte, détail,
+    URL) ne doit pas pouvoir forger une fausse entrée en injectant un saut de
+    ligne. Point unique de neutralisation, partagé par scope._audit,
+    tools.registry._audit et state.world_model._trace_out_of_scope.
+    """
+    return str(value).replace("\r", "\\r").replace("\n", "\\n")
+
+
 def _audit(action: str, detail: str = "") -> None:
     """Append horodaté dans audit.log. Jamais bloquant.
 
     Helper local (même format que tools.registry._audit) : importer le paquet
     `tools` ici créerait un import circulaire.
     """
-    # Une ligne par événement : une cible contenant un saut de ligne ne doit pas
-    # pouvoir forger une fausse entrée d'audit.
-    detail = str(detail).replace("\r", "\\r").replace("\n", "\\n")
-    line = f"{datetime.now().isoformat(timespec='seconds')} | {action} | {detail}\n"
+    line = f"{datetime.now().isoformat(timespec='seconds')} | {_audit_escape(action)} | {_audit_escape(detail)}\n"
     try:
         with open(AUDIT_LOG, "a", encoding="utf-8") as fh:
             fh.write(line)
