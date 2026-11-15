@@ -287,9 +287,21 @@ def _requires_satisfied(world: WorldModel, host: str, service: str, requires: se
     for req in requires:
         if req == "credential" and not world.creds_applicable(service):
             return False
-        if req == "session" and not any(s.host == host and s.alive for s in world.sessions):
+        if req == "session" and not any(
+                s.host == host and s.alive and s.authorized for s in world.sessions):
             return False
     return True
+
+
+def authorize_sessions(world: WorldModel, host: str) -> int:
+    """Autorise les sessions vivantes de `host` pas encore autorisées ;
+    renvoie le nombre de sessions modifiées."""
+    n = 0
+    for s in world.sessions:
+        if s.host == host and s.alive and not s.authorized:
+            s.authorized = True
+            n += 1
+    return n
 
 
 def _task_inputs_fp(world: WorldModel, service: str, requires: set) -> str:

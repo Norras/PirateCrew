@@ -303,3 +303,22 @@ def test_node_integrate_persists_world_each_cycle(tmp_path, monkeypatch):
     state = {"execution_reports": [], "cycle": 0, "thread_id": "mX"}
     orch.node_integrate(state, {"configurable": {"thread_id": "mX"}})
     assert (tmp_path / "mX" / "world.json").exists()
+
+
+def test_requires_session_needs_authorized_session():
+    import orchestrator as orch
+    from state.world_model import Session
+    wm = WorldModel(scope=Scope.from_lines(["127.0.0.1/32"]))
+    wm.add_session(Session(host="127.0.0.1", channel="evil-winrm", authorized=False))
+    assert orch._requires_satisfied(wm, "127.0.0.1", "smb", {"session"}) is False
+    assert orch.authorize_sessions(wm, "127.0.0.1") == 1
+    assert orch._requires_satisfied(wm, "127.0.0.1", "smb", {"session"}) is True
+
+
+def test_authorize_sessions_counts_only_unauthorized_alive():
+    import orchestrator as orch
+    from state.world_model import Session
+    wm = WorldModel(scope=Scope.from_lines(["127.0.0.1/32"]))
+    wm.add_session(Session(host="127.0.0.1", channel="ssh", authorized=True))
+    wm.add_session(Session(host="127.0.0.1", channel="x", alive=False))
+    assert orch.authorize_sessions(wm, "127.0.0.1") == 0

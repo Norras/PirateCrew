@@ -147,6 +147,15 @@ class WorldModel:
         return cred
 
     def add_session(self, sess: Session) -> Session:
+        """Ajoute une session, dédupliquée par (host, channel) : une session
+        existante est rafraîchie (alive/handle/via_cred) et conserve son
+        `authorized`."""
+        for s in self.sessions:
+            if s.host == sess.host and s.channel == sess.channel:
+                s.alive = sess.alive
+                s.handle = sess.handle
+                s.via_cred = sess.via_cred
+                return s
         self.sessions.append(sess)
         return sess
 

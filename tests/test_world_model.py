@@ -92,3 +92,20 @@ def test_to_dict_is_json_serialisable_with_ledger_and_secrets():
     ]
     assert d["credentials"][0]["secret"] == "pw123"  # clair
     assert d["sessions"][0]["authorized"] is False
+
+
+def test_add_session_dedups_by_host_channel_and_preserves_authorized():
+    wm = WorldModel(scope=Scope.from_lines(["127.0.0.1/32"]))
+    s1 = wm.add_session(Session(host="127.0.0.1", channel="evil-winrm", handle="h1"))
+    s1.authorized = True
+    s2 = wm.add_session(Session(host="127.0.0.1", channel="evil-winrm", handle="h2", alive=True))
+    assert len(wm.sessions) == 1          # pas de doublon
+    assert s2 is s1 and s1.handle == "h2" # rafraîchi
+    assert s1.authorized is True          # autorisation préservée au refresh
+
+
+def test_add_session_distinct_channels_coexist():
+    wm = WorldModel(scope=Scope.from_lines(["127.0.0.1/32"]))
+    wm.add_session(Session(host="127.0.0.1", channel="ssh"))
+    wm.add_session(Session(host="127.0.0.1", channel="evil-winrm"))
+    assert len(wm.sessions) == 2
