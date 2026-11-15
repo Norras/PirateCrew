@@ -747,9 +747,16 @@ if __name__ == "__main__":
                 # Garantit world.json + rapport même sur Ctrl-C / exception.
                 w = _MISSIONS.get(mission_id)
                 if w is not None:
-                    mission_io.save_world(w, mission_id)
-                    report_path = mission_io.save_report(w, mission_id)
-                    print(f"\n[MISSION] Rapport : {report_path}")
+                    # Persistance au mieux : un échec ne masque jamais l'exception d'origine.
+                    try:
+                        mission_io.save_world(w, mission_id)
+                    except Exception as exc:
+                        print(f"[MISSION] avertissement: persistance échouée ({type(exc).__name__})")
+                    try:
+                        report_path = mission_io.save_report(w, mission_id)
+                        print(f"\n[MISSION] Rapport : {report_path}")
+                    except Exception as exc:
+                        print(f"[MISSION] avertissement: persistance échouée ({type(exc).__name__})")
             print(f"\nPirateCrew >\n{result.get('final_response', 'Aucune réponse générée.')}")
         except KeyboardInterrupt:
             print("\nInterruption. Sortie.")
