@@ -269,3 +269,24 @@ def test_discover_services_parallel_finds_open_ports():
     assert n == 2
     ports_found = sorted(s.port for h in wm.in_scope_hosts() for s in h.services)
     assert ports_found == [22, 8980]
+
+
+def test_autonomous_discovery_escalates_on_empty_host():
+    from orchestrator import autonomous_discovery
+    wm = WorldModel(scope=Scope.from_lines(["127.0.0.1/32"]))
+    # rien sur les ports par défaut ; un service sur un port haut hors défaut
+    probe = lambda h, p: p == 50000
+    n = autonomous_discovery(wm, ["127.0.0.1"], [80, 443], probe=probe,
+                             fingerprint=lambda h, p: "http")
+    assert n == 1
+    assert any(s.port == 50000 and s.name == "http"
+               for h in wm.in_scope_hosts() for s in h.services)
+
+
+def test_autonomous_discovery_no_escalation_when_service_found():
+    from orchestrator import autonomous_discovery
+    wm = WorldModel(scope=Scope.from_lines(["127.0.0.1/32"]))
+    probe = lambda h, p: p in (80, 50000)   # 80 est dans les défauts
+    autonomous_discovery(wm, ["127.0.0.1"], [80], probe=probe)
+    ports = sorted(s.port for h in wm.in_scope_hosts() for s in h.services)
+    assert ports == [80]  # pas d'escalade → 50000 jamais sondé/enregistré

@@ -414,6 +414,22 @@ def discover_services(world, hosts, ports, probe, fingerprint=None, log=None, wo
     return count
 
 
+def autonomous_discovery(world, hosts, default_ports, probe, fingerprint=None, log=None,
+                         default_workers=64, full_workers=256) -> int:
+    """Découverte auto-escaladante : balayage des `default_ports`, puis, pour chaque hôte
+    resté SANS service, balayage de la plage complète 1-65535 (plus lourd, plus de workers).
+    Renvoie le total de ports ouverts enregistrés."""
+    n1 = discover_services(world, hosts, default_ports, probe, fingerprint, log,
+                           workers=default_workers)
+    empty = [h for h in hosts if h not in world.hosts or not world.hosts[h].services]
+    if empty:
+        n2 = discover_services(world, empty, list(range(1, 65536)), probe, fingerprint, log,
+                               workers=full_workers)
+    else:
+        n2 = 0
+    return n1 + n2
+
+
 def _port_open(host: str, port: int, timeout: float = 3) -> bool:
     """Sonde TCP réelle : vrai si la connexion aboutit."""
     try:
