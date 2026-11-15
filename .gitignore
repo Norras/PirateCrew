@@ -29,6 +29,9 @@ scope.txt
 audit.log
 *.log
 
+# === Missions autonomes (état + artefacts par mission, contient des secrets) ===
+missions/
+
 # === Editor / IDE ===
 .vscode/
 .idea/
