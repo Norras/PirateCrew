@@ -14,6 +14,32 @@ from catalog import load_catalog, techniques_for, technique_by_id
 
 load_dotenv()
 
+# --- Mode verbose (diagnostic) --------------------------------------------- #
+# Activable par la variable d'environnement PIRATECREW_VERBOSE (1/true/on/oui),
+# ou à chaud via la commande « verbose » de l'invite interactive. Imprime des
+# lignes de diagnostic sur la console uniquement (jamais dans audit.log) :
+# hôtes énumérés, ports sondés, ports ouverts/services, tâches planifiées —
+# de quoi comprendre un cycle qui ne planifie « 0 tâche ».
+_VERBOSE = os.getenv("PIRATECREW_VERBOSE", "").strip().lower() in ("1", "true", "yes", "on", "oui")
+
+
+def set_verbose(on: bool) -> None:
+    """Active/désactive le mode verbose (diagnostic) du processus."""
+    global _VERBOSE
+    _VERBOSE = bool(on)
+
+
+def is_verbose() -> bool:
+    """État courant du mode verbose."""
+    return _VERBOSE
+
+
+def _vprint(msg: str) -> None:
+    """Imprime une ligne de diagnostic UNIQUEMENT si le mode verbose est actif."""
+    if _VERBOSE:
+        print(f"[VERBOSE] {msg}")
+
+
 # Catalogue chargé une fois (lecture YAML légère, builtin + operator).
 _CATALOG = load_catalog()
 
@@ -345,11 +371,13 @@ def reconcile_evidence(world: WorldModel, raw_text: str) -> int:
     return added
 
 
-def discover_services(world, hosts, ports, probe, fingerprint=None) -> int:
+def discover_services(world, hosts, ports, probe, fingerprint=None, log=None) -> int:
     """probe(host,port)->bool teste l'ouverture d'un port. Pour chaque port ouvert,
     enregistre un service via world.add_service. Nom du service: PORT_TO_SERVICE.get(str(port))
     si connu; sinon fingerprint(host,port)->str|None s'il est fourni (ex. 'http' pour un
-    service web sur un port inhabituel); sinon ''. Renvoie le nombre de ports ouverts enregistrés."""
+    service web sur un port inhabituel); sinon ''. Renvoie le nombre de ports ouverts enregistrés.
+
+    `log` (optionnel) : callable(str) appelé pour CHAQUE port ouvert (diagnostic verbose)."""
     count = 0
     for host in hosts:
         for port in ports:
@@ -359,6 +387,8 @@ def discover_services(world, hosts, ports, probe, fingerprint=None) -> int:
             if not name and fingerprint is not None:
                 name = fingerprint(host, port)
             world.add_service(host, port, name=name or "")
+            if log:
+                log(f"{host}:{port} ouvert → service '{name or '?'}'")
             count += 1
     return count
 
@@ -391,7 +421,11 @@ def node_recon(state: MissionState, config):
     ports = sorted(set(DEFAULT_RECON_PORTS)
                    | set(requested_ports(state.get("question", "") or ""))
                    | set(requested_ports(state.get("target", "") or "")))
-    discover_services(world, hosts, ports, _port_open, _http_name)
+    _vprint(f"Périmètre : {len(hosts)} hôte(s) à sonder → {hosts[:10]}{' …' if len(hosts) > 10 else ''}")
+    _vprint(f"Ports sondés ({len(ports)}) : {','.join(map(str, ports))}")
+    discover_services(world, hosts, ports, _port_open, _http_name, log=_vprint)
+    _found = [f"{s.host}:{s.port}/{s.name or '?'}" for h in world.in_scope_hosts() for s in h.services]
+    _vprint(f"Services in-scope après découverte ({len(_found)}) : {_found or 'AUCUN'}")
     ctx = (f"OBJECTIF: reconnaître {target}. Pour CHAQUE service ouvert, appelle "
            f"report_finding(kind='service', host='{target}', service=<nom>, port=<port>).")
     agent = build_task_agent("network", world, ctx)
@@ -417,6 +451,8 @@ def node_decide(state: MissionState, config):
     thread_id = config["configurable"]["thread_id"]
     world = get_world(thread_id)
     tasks = plan_tasks(world, _CATALOG)
+    _vprint("Tâches planifiées : " + str(
+        [f"{t['host']}:{t['port']}/{t['service']}→{t['technique_id']}" for t in tasks] or "aucune"))
     services = state.get("discovered_services", [])
     rag = ""
     if services:
@@ -597,6 +633,11 @@ if __name__ == "__main__":
     except ScopeError as exc:
         print(f"[SCOPE] scope.txt absent/vide ({exc}). Les missions autonomes seront refusées.")
 
+    if is_verbose():
+        print("[VERBOSE] mode activé (PIRATECREW_VERBOSE). Tapez « verbose » pour basculer.")
+    else:
+        print("Astuce : tapez « verbose » pour activer les diagnostics détaillés (ports/services/tâches).")
+
     config = {"configurable": {"thread_id": "session_pirate_master"}}
 
     while True:
@@ -606,6 +647,16 @@ if __name__ == "__main__":
                 print("Fermeture de PirateCrew.")
                 break
             if not user_input.strip():
+                continue
+
+            # Bascule du mode verbose (diagnostic) : « verbose », « verbose on/off ».
+            _parts = user_input.strip().lower().split()
+            if _parts[0] == "verbose":
+                if len(_parts) == 1:
+                    set_verbose(not is_verbose())
+                else:
+                    set_verbose(_parts[1] in ("on", "1", "true", "yes", "oui"))
+                print(f"[VERBOSE] mode {'activé' if is_verbose() else 'désactivé'}.")
                 continue
 
             # Cible = première IP mentionnée dans la requête, sinon 127.0.0.1.

@@ -219,3 +219,29 @@ def test_reconcile_ignores_header_like_value_near_cue():
     wm = WorldModel(scope=Scope.from_lines(["10.10.10.0/24"]))
     reconcile_evidence(wm, "Password policy:\nServer:nginx")
     assert len(wm.credentials) == 0
+
+
+def test_discover_services_logs_each_open_port():
+    # Mode verbose : un callback `log` reçoit une ligne par port ouvert (et aucune
+    # pour les ports fermés), avec l'hôte, le port et le service détecté.
+    from orchestrator import discover_services
+    wm = WorldModel(scope=Scope.from_lines(["127.0.0.1/32"]))
+    msgs = []
+    discover_services(wm, ["127.0.0.1"], [80, 8980],
+                      probe=lambda h, p: p == 8980,
+                      fingerprint=lambda h, p: "http",
+                      log=msgs.append)
+    assert len(msgs) == 1
+    assert "8980" in msgs[0] and "http" in msgs[0]
+
+
+def test_vprint_respects_verbose_flag(capsys):
+    # _vprint n'imprime que lorsque le mode verbose est actif ; set_verbose bascule.
+    import orchestrator as orch
+    orch.set_verbose(False)
+    orch._vprint("caché")
+    assert capsys.readouterr().out == ""
+    orch.set_verbose(True)
+    orch._vprint("visible")
+    assert "visible" in capsys.readouterr().out
+    orch.set_verbose(False)  # restaure l'état global
