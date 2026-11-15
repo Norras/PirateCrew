@@ -31,3 +31,57 @@ def save_world(world, mission_id: str, root: Path | None = None) -> Path:
         json.dumps(world.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8"
     )
     return path
+
+
+def render_report(world) -> str:
+    """Rapport Markdown de fin de mission (credentials en clair, voulu par la spec)."""
+    ips = [h.ip for h in world.in_scope_hosts()]
+    services = [
+        f"{ip}:{s.port}/{s.name}"
+        for ip, h in world.hosts.items()
+        for s in h.services
+    ]
+    tools = [e for e in world.evidence if e.get("kind") == "tool_request"]
+    L = [
+        "# Rapport de mission",
+        "",
+        f"{len(ips)} hôte(s) in-scope, {len(services)} service(s), "
+        f"{len(world.credentials)} credential(s), {len(world.sessions)} session(s), "
+        f"{len(world.loot)} butin(s).",
+        "",
+        "## Hôtes in-scope",
+        *[f"- {ip}" for ip in ips],
+        "",
+        "## Services",
+        *[f"- {s}" for s in services],
+        "",
+        "## Credentials",
+        *[f"- {c.principal}:{c.secret} ({c.source})" for c in world.credentials],
+        "",
+        "## Sessions",
+        *[
+            f"- {s.host} via {s.channel} — {'autorisée' if s.authorized else 'en attente'}"
+            for s in world.sessions
+        ],
+        "",
+        "## Butin",
+        *[f"- {item}" for item in world.loot],
+        "",
+        "## Techniques",
+        *[
+            f"- {h} {svc}:{port} {tech} — {status}"
+            for (h, svc, tech, _fp, port), status in world.technique_ledger.items()
+        ],
+    ]
+    if tools:
+        L += ["", "## Outils manquants", *[f"- {e}" for e in tools]]
+    return "\n".join(L) + "\n"
+
+
+def save_report(world, mission_id: str, root: Path | None = None) -> Path:
+    """Écrit le rapport en rapport.md et renvoie le chemin."""
+    d = mission_dir(mission_id, root)
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / "rapport.md"
+    path.write_text(render_report(world), encoding="utf-8")
+    return path
