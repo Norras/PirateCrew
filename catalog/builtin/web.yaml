@@ -17,3 +17,12 @@
   command_template: "http_get http://{target}:{port}/"
   success_signal: "HTTP"
   provided_by: builtin
+- id: http.harvest
+  name: Lecture du contenu listé (index + fichiers exposés)
+  domain: web
+  service: http
+  requires: []
+  tool: http_get_listing
+  command_template: "http_get_listing http://{target}:{port}/"
+  success_signal: "HTTP"
+  provided_by: builtin

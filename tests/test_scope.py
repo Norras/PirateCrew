@@ -77,3 +77,15 @@ def test_audit_line_escapes_newline(monkeypatch):
     audit = Path(scope.AUDIT_LOG).read_text(encoding="utf-8")
     assert audit.count("\n") == 1 and audit.endswith("\n")
     assert audit.rstrip("\n").endswith("| OUT_OF_SCOPE | 1.1.1.1\\nFAKE")
+
+
+def test_hosts_single_address():
+    assert Scope.from_lines(["127.0.0.1/32"]).hosts() == ["127.0.0.1"]
+
+
+def test_hosts_excludes_network_and_broadcast():
+    assert Scope.from_lines(["10.0.0.0/30"]).hosts() == ["10.0.0.1", "10.0.0.2"]
+
+
+def test_hosts_respects_max_hosts():
+    assert len(Scope.from_lines(["10.0.0.0/8"]).hosts(max_hosts=5)) == 5

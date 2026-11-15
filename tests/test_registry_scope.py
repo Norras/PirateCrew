@@ -117,3 +117,10 @@ def test_smb_list_shares_builds_argv(monkeypatch, local_scope):
     assert captured["cmd"][0] == "smbclient" and "-L" in captured["cmd"]
     assert "//127.0.0.1" in captured["cmd"]
     assert "IPC$" in out
+
+
+def test_listing_links_filters_parent_and_sort_links():
+    from tools.registry import _listing_links
+    html = ('<a href="?C=N;O=D">n</a><a href="../">Parent</a>'
+            '<a href=".secret">.secret</a><a href="sub/">sub/</a>')
+    assert _listing_links(html) == [".secret", "sub/"]

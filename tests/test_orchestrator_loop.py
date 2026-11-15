@@ -148,3 +148,74 @@ def test_start_mission_reuses_worldmodel_on_same_thread():
     w2 = orch.start_mission("t_reuse", sc)
     assert w2 is w1 and w2.is_tried("127.0.0.1", "smb", "smb.port_probe", inputs_fp="", port=445) is True
     assert orch.start_mission("t_other_thread", sc) is not w1
+
+
+def test_requested_ports_host_port():
+    from orchestrator import requested_ports
+    assert requested_ports("fais une analyse sur 127.0.0.1:8980") == [8980]
+
+
+def test_requested_ports_word_port():
+    from orchestrator import requested_ports
+    assert requested_ports("vérifie le port 8980") == [8980]
+
+
+def test_requested_ports_none():
+    from orchestrator import requested_ports
+    assert requested_ports("analyse tout le périmètre autorisé") == []
+
+
+def test_requested_ports_out_of_range():
+    from orchestrator import requested_ports
+    assert requested_ports("port 99999") == []
+
+
+def _services_named(wm, host, port):
+    return [s.name for h in wm.in_scope_hosts() if h.ip == host
+            for s in h.services if s.port == port]
+
+
+def test_discover_services_fingerprint_names_unusual_port():
+    from orchestrator import discover_services
+    wm = WorldModel(scope=Scope.from_lines(["127.0.0.1/32"]))
+    n = discover_services(wm, ["127.0.0.1"], [80, 8980],
+                          probe=lambda h, p: p == 8980,
+                          fingerprint=lambda h, p: "http")
+    assert n == 1
+    assert _services_named(wm, "127.0.0.1", 8980) == ["http"]
+
+
+def test_discover_services_known_port_uses_mapping():
+    from orchestrator import discover_services
+    wm = WorldModel(scope=Scope.from_lines(["127.0.0.1/32"]))
+    discover_services(wm, ["127.0.0.1"], [80, 8980], probe=lambda h, p: p == 80)
+    assert _services_named(wm, "127.0.0.1", 80) == ["http"]
+
+
+def test_discover_services_nothing_open():
+    from orchestrator import discover_services
+    wm = WorldModel(scope=Scope.from_lines(["127.0.0.1/32"]))
+    n = discover_services(wm, ["127.0.0.1"], [80, 8980], probe=lambda h, p: False)
+    assert n == 0
+    assert [s for h in wm.in_scope_hosts() for s in h.services] == []
+
+
+def test_reconcile_credential_on_line_after_cue():
+    wm = WorldModel(scope=Scope.from_lines(["10.10.10.0/24"]))
+    reconcile_evidence(wm, "Cred for DC :\nDamulsan:AAJJAQBenough1728!")
+    assert any(c.principal == "Damulsan" and c.secret == "AAJJAQBenough1728!"
+               for c in wm.credentials)
+
+
+def test_reconcile_no_cue_word_adds_no_credential():
+    wm = WorldModel(scope=Scope.from_lines(["10.10.10.0/24"]))
+    reconcile_evidence(wm, "Server:nginx\nHost:10.0.0.1")
+    assert len(wm.credentials) == 0
+
+
+def test_reconcile_ignores_header_like_value_near_cue():
+    # Un en-tête compact « Clé:valeur » dans la fenêtre d'un indice ne doit PAS
+    # devenir un faux credential (garde anti-fabrication, cf. « Server:nginx »).
+    wm = WorldModel(scope=Scope.from_lines(["10.10.10.0/24"]))
+    reconcile_evidence(wm, "Password policy:\nServer:nginx")
+    assert len(wm.credentials) == 0

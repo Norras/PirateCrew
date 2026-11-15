@@ -226,6 +226,36 @@ def http_get(url: str) -> str:
     return f"{url} → HTTP {status} {reason}\n{text}"
 
 
+_HREF_RE = re.compile(r"""href\s*=\s*["']([^"']*)["']""", re.IGNORECASE)
+
+
+def _listing_links(html: str) -> list[str]:
+    """Liens relatifs (fichiers/dossiers) d'un index de répertoire http.server.
+    Écarte les liens de tri (`?`), absolus (`/`, `http`), ancres (`#`) et le parent
+    (`..`). Dédoublonné, ordre conservé."""
+    out: list[str] = []
+    for m in _HREF_RE.finditer(html or ""):
+        href = m.group(1).strip()
+        if not href or href.startswith(("?", "/", "http", "#")) or ".." in href:
+            continue
+        if href not in out:
+            out.append(href)
+    return out
+
+
+@tool
+def http_get_listing(url: str) -> str:
+    """Lit un index de répertoire HTTP AUTORISÉ ET le contenu des fichiers listés
+    (20 max). Réutilise http_get : la validation du périmètre est héritée."""
+    root = http_get.invoke({"url": url})
+    base = url if url.endswith("/") else url + "/"
+    parts = [root]
+    for name in _listing_links(root)[:20]:
+        body = http_get.invoke({"url": base + name})
+        parts.append(f"=== {name} ===\n{body}")
+    return "\n\n".join(parts)
+
+
 # --------------------------------------------------------------------------- #
 # Domaine : ad (Active Directory / SMB)
 # --------------------------------------------------------------------------- #
@@ -320,6 +350,6 @@ MANDATORY_TOOLS = [log_audit_event, scope_check]
 
 TOOL_CATALOG = {
     "network": [nmap_scan, tcp_port_check],
-    "web": [http_fingerprint, http_get],
+    "web": [http_fingerprint, http_get, http_get_listing],
     "ad": [smb_port_probe, smb_list_shares],
 }

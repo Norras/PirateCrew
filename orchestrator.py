@@ -1,6 +1,7 @@
 import os
 import re
 import shutil
+import socket
 from typing import TypedDict, List, Dict, Any, Literal
 from dotenv import load_dotenv
 from langchain_anthropic import ChatAnthropic
@@ -74,6 +75,26 @@ PORT_TO_SERVICE = {
     "139": "netbios", "143": "smtp", "443": "https", "445": "smb",
     "3306": "mysql", "3389": "rdp", "5985": "winrm", "8080": "http",
 }
+# Ports sondés par défaut lors de la reconnaissance (source unique).
+DEFAULT_RECON_PORTS = [21, 22, 23, 25, 53, 80, 110, 135, 139, 143, 443, 445, 993, 995,
+                       1433, 1521, 3306, 3389, 5432, 5900, 5985, 5986, 6379, 8000,
+                       8080, 8443, 8888, 9000, 9090]
+_HOSTPORT_RE = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}:(\d{1,5})\b")
+_PORTWORD_RE = re.compile(r"\bports?\s+(\d{1,5})\b", re.IGNORECASE)
+
+
+def requested_ports(text: str) -> list[int]:
+    """Ports explicitement nommés dans une requête (`ip:port`, `port N`).
+    Bornés à 1..65535, dédoublonnés, triés."""
+    found = set()
+    for rx in (_HOSTPORT_RE, _PORTWORD_RE):
+        for m in rx.finditer(text or ""):
+            n = int(m.group(1))
+            if 1 <= n <= 65535:
+                found.add(n)
+    return sorted(found)
+
+
 # Domaine d'outils à déployer selon le service découvert.
 SERVICE_DOMAIN = {
     "http": "web", "https": "web",
@@ -84,7 +105,7 @@ SERVICE_DOMAIN = {
 # le `tool` n'est PAS ici est considérée comme dépendante d'un binaire externe,
 # vérifié via shutil.which (cf. technique_available / escalade « outil manquant »).
 PYTHON_TOOLS = {
-    "tcp_port_check", "http_fingerprint", "http_get", "smb_port_probe",
+    "tcp_port_check", "http_fingerprint", "http_get", "http_get_listing", "smb_port_probe",
     "scope_check", "log_audit_event", "report_finding",
 }
 
@@ -270,7 +291,7 @@ def plan_tasks(world: WorldModel, catalog: list) -> List[Dict[str, Any]]:
 
 
 # Motifs best-effort pour le rattrapage de trouvailles dans du texte brut (R1).
-_CRED_RE = re.compile(r"\b([A-Za-z][A-Za-z0-9._\\-]{1,63}):([^\s:/]{3,64})\b")
+_CRED_RE = re.compile(r"\b([A-Za-z][A-Za-z0-9._\\-]{1,63}):([^\s:/]{3,64})(?:\b|(?<=\W)(?=\s|$))")
 _IPV4_RE = re.compile(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b")
 # Indice explicite de credential : un 'mot:valeur' n'est retenu que sur une ligne
 # qui en porte un, sinon « Server:nginx » / « Host:10.0.0.1 » fabriquent de faux
@@ -279,6 +300,17 @@ _CRED_CUE_RE = re.compile(
     r"\b(cred|creds|credential|credentials|password|passwd|pwd|login|logon|secret|hash|ntlm|kerb)\b",
     re.IGNORECASE,
 )
+# Noms d'en-têtes/étiquettes à ne JAMAIS prendre pour un principal de credential.
+# La fenêtre d'indice (cue + 2 lignes) peut survoler un « Server:nginx » /
+# « Host:10.0.0.1 » compact : ce sont de la prose structurée, pas des identifiants.
+_NON_CRED_PRINCIPALS = {
+    "server", "host", "date", "connection", "content", "content-type",
+    "content-length", "content-encoding", "transfer-encoding", "location",
+    "etag", "vary", "cache-control", "set-cookie", "cookie", "x-powered-by",
+    "x-frame-options", "last-modified", "accept-ranges", "keep-alive",
+    "www-authenticate", "user-agent", "referer", "via", "upgrade", "allow",
+    "pragma", "expires", "strict-transport-security",
+}
 
 
 def reconcile_evidence(world: WorldModel, raw_text: str) -> int:
@@ -289,22 +321,62 @@ def reconcile_evidence(world: WorldModel, raw_text: str) -> int:
     added = 0
     # Credentials : uniquement depuis une LIGNE portant un indice explicite de
     # credential (anti-fabrication depuis de la prose « mot:valeur » anodine).
-    for line in text.splitlines():
+    # Fenêtre ancrée sur l'indice : la ligne du cue + les 2 suivantes (les
+    # fichiers réels séparent souvent « Cred for DC : » de la valeur).
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
         if not _CRED_CUE_RE.search(line):
             continue
-        for m in _CRED_RE.finditer(line):
-            principal, secret = m.group(1), m.group(2)
-            before = len(world.credentials)
-            world.add_credential(Credential(kind="password", principal=principal,
-                                            secret=secret, source="evidence-reconcile"))
-            if len(world.credentials) > before:
-                added += 1
+        for window_line in lines[i:i + 3]:
+            for m in _CRED_RE.finditer(window_line):
+                principal, secret = m.group(1), m.group(2)
+                if principal.lower() in _NON_CRED_PRINCIPALS:
+                    continue
+                before = len(world.credentials)
+                world.add_credential(Credential(kind="password", principal=principal,
+                                                secret=secret, source="evidence-reconcile"))
+                if len(world.credentials) > before:
+                    added += 1
     for m in _IPV4_RE.finditer(text):
         ip = m.group(1)
         if ip not in world.hosts:
             world.add_host(ip)
             added += 1
     return added
+
+
+def discover_services(world, hosts, ports, probe, fingerprint=None) -> int:
+    """probe(host,port)->bool teste l'ouverture d'un port. Pour chaque port ouvert,
+    enregistre un service via world.add_service. Nom du service: PORT_TO_SERVICE.get(str(port))
+    si connu; sinon fingerprint(host,port)->str|None s'il est fourni (ex. 'http' pour un
+    service web sur un port inhabituel); sinon ''. Renvoie le nombre de ports ouverts enregistrés."""
+    count = 0
+    for host in hosts:
+        for port in ports:
+            if not probe(host, port):
+                continue
+            name = PORT_TO_SERVICE.get(str(port))
+            if not name and fingerprint is not None:
+                name = fingerprint(host, port)
+            world.add_service(host, port, name=name or "")
+            count += 1
+    return count
+
+
+def _port_open(host: str, port: int, timeout: float = 3) -> bool:
+    """Sonde TCP réelle : vrai si la connexion aboutit."""
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _http_name(host: str, port: int) -> str | None:
+    """'http' si le port répond en HTTP (via l'outil http_fingerprint), sinon None."""
+    from tools.registry import http_fingerprint
+    out = http_fingerprint.invoke({"url": f"http://{host}:{port}/"})
+    return "http" if "HTTP" in str(out) else None
 
 
 # --- 5. NŒUDS DE LA MISSION AUTONOME (boucle à état) ------------------------ #
@@ -314,11 +386,17 @@ def node_recon(state: MissionState, config):
     world = get_world(thread_id)
     target = state.get("target") or "127.0.0.1"
     print(f"\n[MISSION] Reconnaissance de {target} (cycle {state.get('cycle', 0)})...")
+    # Découverte déterministe multi-hôtes / multi-ports (sans LLM), bornée au périmètre.
+    hosts = world.scope.hosts(max_hosts=256)
+    ports = sorted(set(DEFAULT_RECON_PORTS)
+                   | set(requested_ports(state.get("question", "") or ""))
+                   | set(requested_ports(state.get("target", "") or "")))
+    discover_services(world, hosts, ports, _port_open, _http_name)
     ctx = (f"OBJECTIF: reconnaître {target}. Pour CHAQUE service ouvert, appelle "
            f"report_finding(kind='service', host='{target}', service=<nom>, port=<port>).")
     agent = build_task_agent("network", world, ctx)
     query = (f"Scanne la cible {target}. Utilise nmap_scan si disponible, sinon tcp_port_check "
-             f"sur les ports courants (21,22,80,443,139,445,3389,8080). "
+             f"sur les ports courants ({','.join(map(str, ports))}). "
              f"Remonte chaque service ouvert via report_finding.")
     try:
         result = agent.invoke({"messages": [("user", query)]})

@@ -66,6 +66,25 @@ class Scope:
     def __init__(self, networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network]):
         self.networks = list(networks)
 
+    def hosts(self, max_hosts: int = 256) -> list[str]:
+        """Énumère les adresses hôtes du périmètre (bornée à `max_hosts`).
+
+        Un /32 donne son unique adresse ; sinon les adresses utilisables
+        (sans réseau/broadcast IPv4). Dédoublonné, ordre d'apparition conservé.
+        """
+        out: list[str] = []
+        seen: set[str] = set()
+        for net in self.networks:
+            it = ([net.network_address] if net.num_addresses == 1 else net.hosts())
+            for addr in it:
+                if len(out) >= max_hosts:
+                    return out
+                text = str(addr)
+                if text not in seen:
+                    seen.add(text)
+                    out.append(text)
+        return out
+
     @classmethod
     def from_lines(cls, lines: list[str]) -> "Scope":
         """Construit un périmètre : une entrée IP ou CIDR par ligne.
