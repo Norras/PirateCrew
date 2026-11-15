@@ -1,11 +1,14 @@
 """Garde-fous offensifs : contrôles purs sur une commande déjà rendue.
 
-Aucun LLM, réseau, fichier ni sous-processus : ces fonctions inspectent la
-chaîne de commande et consultent le périmètre actif (fail-closed : sans
-périmètre, toute IPv4 est hors périmètre). La denylist est une liste de
+Aucun LLM, réseau ni sous-processus : ces fonctions inspectent la chaîne de
+commande et lisent le périmètre actif (fail-closed : sans périmètre, toute
+IPv4 est hors périmètre). Seul effet de bord : `assert_in_scope` journalise
+les refus (OUT_OF_SCOPE) dans audit.log, donc `scope_violations`/`evaluate`
+ne sont pas strictement sans effet de bord. La denylist est une liste de
 blocage volontairement large (insensible à la casse) : en cas de doute, on bloque.
 """
 
+import ipaddress
 import re
 import shlex
 
@@ -21,14 +24,14 @@ SHELL_METACHARS: frozenset[str] = frozenset(";|&><`$\n\r")
 DENYLIST: list[tuple[re.Pattern, str]] = [
     (re.compile(p, re.I), label)
     for p, label in [
-        (r"\brm\s+-[a-z]*[rf]", "rm -rf"),
+        (r"\brm\b.*\s-[a-z-]*[rf]", "rm -rf"),
         (r"\bmkfs", "mkfs"),
         (r"\bdd\s+[^|]*\bof=", "dd of="),
         (r"\bshutdown\b", "shutdown"),
         (r"\breboot\b", "reboot"),
         (r":\(\)\s*\{", "fork-bomb"),
-        (r"\bformat\s+[a-z]:", "format <lecteur>:"),
-        (r"\bdel\s+/s", "del /s"),
+        (r"\bformat\b.*\b[a-z]:", "format <lecteur>:"),
+        (r"\bdel\b.*\s/[sqf]\b", "del /s|/q|/f"),
         (r"\bDROP\s+(TABLE|DATABASE)\b", "DROP TABLE/DATABASE"),
         (r"\bTRUNCATE\b", "TRUNCATE"),
         (r"of=/dev/", "écriture périphérique bloc (of=/dev/)"),
@@ -62,6 +65,11 @@ def scope_violations(rendered: str) -> list[str]:
         if ip in out:
             continue
         try:
+            ipaddress.ip_address(ip)
+        except ValueError:
+            out.append(ip)  # dotted-quad invalide : violation locale, jamais de DNS
+            continue
+        try:
             assert_in_scope(ip)
         except ScopeError:
             out.append(ip)
@@ -73,7 +81,10 @@ def tokenize_argv(rendered: str) -> list[str]:
     meta = shell_metachar(rendered)
     if meta is not None:
         raise GuardrailError(f"métacaractère shell interdit : {meta!r}")
-    return shlex.split(rendered, posix=True)
+    try:
+        return shlex.split(rendered, posix=True)
+    except ValueError as exc:
+        raise GuardrailError(f"commande non découpable : {exc}") from exc
 
 
 def evaluate(rendered: str) -> tuple[str, str] | None:
