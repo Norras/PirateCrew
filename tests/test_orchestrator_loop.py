@@ -92,6 +92,28 @@ def test_render_template_fills_target_and_port():
     assert orch._render_template("", "127.0.0.1", 80) == ""
 
 
+def test_render_template_substitutes_credential_fields():
+    import orchestrator as orch
+    from state.world_model import Credential
+    creds = [Credential(kind="hash", principal="CORP\\admin", secret="aad3b:deadbeef", source="t")]
+    out = orch._render_template("evil-winrm -i {target} -u {user} -H {hash}", "127.0.0.1", creds=creds)
+    assert out == "evil-winrm -i 127.0.0.1 -u admin -H aad3b:deadbeef"
+
+
+def test_render_template_domain_from_principal():
+    import orchestrator as orch
+    from state.world_model import Credential
+    creds = [Credential(kind="password", principal="user@corp.local", secret="P@ss", source="t")]
+    out = orch._render_template("cmd {user} {domain} {password}", "127.0.0.1", creds=creds)
+    assert out == "cmd user corp.local P@ss"
+
+
+def test_render_template_unknown_placeholder_returns_raw():
+    import orchestrator as orch
+    # Pas de cred : {user} inconnu -> gabarit brut (contrat Projet 1 inchange).
+    assert orch._render_template("x {user}", "127.0.0.1") == "x {user}"
+
+
 def _patch_fake_agent(monkeypatch):
     class _Msg:
         content = "OK (fake)"

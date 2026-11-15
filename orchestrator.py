@@ -161,13 +161,35 @@ def technique_available(tech) -> bool:
     return shutil.which(tool) is not None
 
 
-def _render_template(template: str, host: str, port: int = 0) -> str:
-    """Rend un gabarit de commande avec {target}/{port}. Un placeholder inconnu
-    (ex. {user}, {hash}) renvoie le gabarit brut, sans lever."""
+def _split_principal(principal: str) -> tuple:
+    """Découpe un principal en (domaine, utilisateur) : `CORP\\user`,
+    `user@corp.local` ou `user` (domaine vide)."""
+    if "\\" in principal:
+        domain, _, user = principal.partition("\\")
+        return domain, user
+    if "@" in principal:
+        user, _, domain = principal.partition("@")
+        return domain, user
+    return "", principal
+
+
+def _render_template(template: str, host: str, port: int = 0,
+                     creds: list | None = None, context: dict | None = None) -> str:
+    """Rend un gabarit de commande avec {target}/{port} et, si `creds` est non
+    vide, {user}/{domain}/{hash}/{password}/{secret} (depuis creds[0]) ;
+    {share} vient de `context`. Un placeholder inconnu renvoie le gabarit brut,
+    sans lever."""
     if not template:
         return ""
+    subs: Dict[str, Any] = {"target": host, "port": port}
+    if creds:
+        domain, user = _split_principal(creds[0].principal)
+        subs.update(user=user, domain=domain, hash=creds[0].secret,
+                    password=creds[0].secret, secret=creds[0].secret)
+    if context and "share" in context:
+        subs["share"] = context["share"]
     try:
-        return template.format(target=host, port=port)
+        return template.format(**subs)
     except (KeyError, IndexError, ValueError):
         return template
 
