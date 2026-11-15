@@ -53,9 +53,10 @@ _MISSIONS: Dict[str, WorldModel] = {}
 
 
 def start_mission(thread_id: str, scope) -> WorldModel:
-    """Crée le modèle du terrain d'une mission, ou RÉUTILISE celui déjà associé au
-    thread_id (reprise : ledger + trouvailles préservés). Le périmètre fraîchement
-    chargé est ré-appliqué dans tous les cas."""
+    """Crée le modèle du terrain d'une mission, ou renvoie celui déjà associé au
+    thread_id dans ce processus (registre en mémoire). Projet 1 : une mission par
+    exécution (mission_id unique) — il n'y a PAS de reprise automatique entre
+    exécutions. Le périmètre fraîchement chargé est ré-appliqué dans tous les cas."""
     world = _MISSIONS.get(thread_id)
     if world is None:
         world = WorldModel(scope=scope)
@@ -419,11 +420,12 @@ def autonomous_discovery(world, hosts, default_ports, probe, fingerprint=None, l
                          default_workers=64, full_workers=256) -> int:
     """Découverte auto-escaladante : balayage des `default_ports`, puis, pour chaque hôte
     resté SANS service, balayage de la plage complète 1-65535 (plus lourd, plus de workers).
+    Pas d'escalade si `default_ports` couvre déjà toute la plage (rien de plus à sonder).
     Renvoie le total de ports ouverts enregistrés."""
     n1 = discover_services(world, hosts, default_ports, probe, fingerprint, log,
                            workers=default_workers)
     empty = [h for h in hosts if h not in world.hosts or not world.hosts[h].services]
-    if empty:
+    if empty and len(default_ports) < 65535:
         n2 = discover_services(world, empty, list(range(1, 65536)), probe, fingerprint, log,
                                workers=full_workers)
     else:
@@ -474,7 +476,8 @@ def node_recon(state: MissionState, config):
     _vprint(f"Ports sondés ({len(ports)}, {workers} workers) : {ports_desc}")
     # Découverte auto-escaladante (plage complète si les ports par défaut sont vides).
     probe = lambda h, p: _port_open(h, p, timeout=1.0)  # noqa: E731
-    autonomous_discovery(world, hosts, ports, probe, _http_name, log=_vprint)
+    autonomous_discovery(world, hosts, ports, probe, _http_name, log=_vprint,
+                         default_workers=workers)
     _found = [f"{s.host}:{s.port}/{s.name or '?'}" for h in world.in_scope_hosts() for s in h.services]
     _vprint(f"Services in-scope après découverte ({len(_found)}) : {_found or 'AUCUN'}")
     ctx = (f"OBJECTIF: reconnaître {target}. Pour CHAQUE service ouvert, appelle "
@@ -596,7 +599,10 @@ def node_integrate(state: MissionState, config):
                     ". Installe-le(s) dans l'environnement (Kali) puis relance la même mission pour les débloquer.")
     print(f"[MISSION] Intégration : {summary}")
     # Persistance à chaque cycle : les trouvailles survivent à un crash/interruption.
-    mission_io.save_world(world, thread_id)
+    try:
+        mission_io.save_world(world, thread_id)
+    except Exception as e:  # persistance au mieux : ne jamais interrompre la mission
+        print(f"[MISSION] avertissement: persistance échouée ({type(e).__name__})")
     return {"cycle": cycle, "final_response": summary}
 
 

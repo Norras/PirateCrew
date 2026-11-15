@@ -33,12 +33,26 @@ def save_world(world, mission_id: str, root: Path | None = None) -> Path:
     return path
 
 
+def _fmt_item(item) -> str:
+    """Ligne lisible pour un butin (dict → `clé=valeur`, robuste aux clés absentes)."""
+    if isinstance(item, dict):
+        return ", ".join(f"{k}={v}" for k, v in item.items()) or "?"
+    return str(item)
+
+
+def _fmt_tool(e) -> str:
+    """Ligne lisible pour une demande d'outil manquant."""
+    if isinstance(e, dict):
+        return f"{e.get('tool', '?')} — {e.get('technique', '?')} @ {e.get('host', '?')}"
+    return str(e)
+
+
 def render_report(world) -> str:
     """Rapport Markdown de fin de mission (credentials en clair, voulu par la spec)."""
     ips = [h.ip for h in world.in_scope_hosts()]
     services = [
-        f"{ip}:{s.port}/{s.name}"
-        for ip, h in world.hosts.items()
+        f"{h.ip}:{s.port}/{s.name or '?'}"
+        for h in world.in_scope_hosts()
         for s in h.services
     ]
     tools = [e for e in world.evidence if e.get("kind") == "tool_request"]
@@ -65,7 +79,7 @@ def render_report(world) -> str:
         ],
         "",
         "## Butin",
-        *[f"- {item}" for item in world.loot],
+        *[f"- {_fmt_item(item)}" for item in world.loot],
         "",
         "## Techniques",
         *[
@@ -74,7 +88,7 @@ def render_report(world) -> str:
         ],
     ]
     if tools:
-        L += ["", "## Outils manquants", *[f"- {e}" for e in tools]]
+        L += ["", "## Outils manquants", *[f"- {_fmt_tool(e)}" for e in tools]]
     return "\n".join(L) + "\n"
 
 

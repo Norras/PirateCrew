@@ -104,8 +104,10 @@ def _patch_fake_agent(monkeypatch):
                         lambda domain, world=None, mission_context="": _FakeAgent())
 
 
-def test_blocked_missing_tool_escalates_and_not_marked_tried(monkeypatch):
+def test_blocked_missing_tool_escalates_and_not_marked_tried(monkeypatch, tmp_path):
     import orchestrator as orch
+    from state import mission_io
+    monkeypatch.setattr(mission_io, "MISSIONS_ROOT", tmp_path)
     _patch_fake_agent(monkeypatch)
     monkeypatch.setattr(orch.shutil, "which", lambda b: None)  # smbclient absent
     wm = WorldModel(scope=Scope.from_lines(["127.0.0.1/32"]))
