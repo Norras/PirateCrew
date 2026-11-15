@@ -121,6 +121,20 @@ def requested_ports(text: str) -> list[int]:
     return sorted(found)
 
 
+# Intention de balayage de la PLAGE COMPLÈTE (1-65535).
+_FULL_SCAN_RE = re.compile(
+    r"(tous?\s+les?\s+ports|all\s+ports|full[-\s]?port|scan\s+complet|"
+    r"balayage\s+complet|plage\s+compl[eè]te|-p-|1-65535)",
+    re.IGNORECASE,
+)
+
+
+def wants_full_scan(text: str) -> bool:
+    """Vrai si la requête demande un balayage de la plage COMPLÈTE 1-65535
+    (« tous les ports », « scan complet », « all ports », « -p- »)."""
+    return bool(_FULL_SCAN_RE.search(text or ""))
+
+
 # Domaine d'outils à déployer selon le service découvert.
 SERVICE_DOMAIN = {
     "http": "web", "https": "web",
@@ -371,25 +385,32 @@ def reconcile_evidence(world: WorldModel, raw_text: str) -> int:
     return added
 
 
-def discover_services(world, hosts, ports, probe, fingerprint=None, log=None) -> int:
+def discover_services(world, hosts, ports, probe, fingerprint=None, log=None, workers=1) -> int:
     """probe(host,port)->bool teste l'ouverture d'un port. Pour chaque port ouvert,
     enregistre un service via world.add_service. Nom du service: PORT_TO_SERVICE.get(str(port))
     si connu; sinon fingerprint(host,port)->str|None s'il est fourni (ex. 'http' pour un
     service web sur un port inhabituel); sinon ''. Renvoie le nombre de ports ouverts enregistrés.
 
-    `log` (optionnel) : callable(str) appelé pour CHAQUE port ouvert (diagnostic verbose)."""
+    `log` (optionnel) : callable(str) appelé pour CHAQUE port ouvert (diagnostic verbose).
+    `workers`>1 : sonde les (hôte,port) EN PARALLÈLE (threads, I/O-bound) ; l'enregistrement
+    des services reste SÉQUENTIEL et déterministe (WorldModel non thread-safe)."""
+    targets = [(host, port) for host in hosts for port in ports]
+    if workers and workers > 1 and len(targets) > 1:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            flags = list(pool.map(lambda t: probe(t[0], t[1]), targets))  # map préserve l'ordre
+        open_targets = [t for t, ok in zip(targets, flags) if ok]
+    else:
+        open_targets = [(host, port) for (host, port) in targets if probe(host, port)]
     count = 0
-    for host in hosts:
-        for port in ports:
-            if not probe(host, port):
-                continue
-            name = PORT_TO_SERVICE.get(str(port))
-            if not name and fingerprint is not None:
-                name = fingerprint(host, port)
-            world.add_service(host, port, name=name or "")
-            if log:
-                log(f"{host}:{port} ouvert → service '{name or '?'}'")
-            count += 1
+    for host, port in open_targets:
+        name = PORT_TO_SERVICE.get(str(port))
+        if not name and fingerprint is not None:
+            name = fingerprint(host, port)
+        world.add_service(host, port, name=name or "")
+        if log:
+            log(f"{host}:{port} ouvert → service '{name or '?'}'")
+        count += 1
     return count
 
 
@@ -418,19 +439,34 @@ def node_recon(state: MissionState, config):
     print(f"\n[MISSION] Reconnaissance de {target} (cycle {state.get('cycle', 0)})...")
     # Découverte déterministe multi-hôtes / multi-ports (sans LLM), bornée au périmètre.
     hosts = world.scope.hosts(max_hosts=256)
-    ports = sorted(set(DEFAULT_RECON_PORTS)
-                   | set(requested_ports(state.get("question", "") or ""))
-                   | set(requested_ports(state.get("target", "") or "")))
+    full = (wants_full_scan(state.get("question", "") or "")
+            or wants_full_scan(state.get("target", "") or ""))
+    if full:
+        # Plage complète : sondage parallèle + timeout court (sinon des milliers de
+        # ports filtrés feraient traîner le cycle jusqu'au bout des timeouts).
+        ports = list(range(1, 65536))
+        workers = 256
+        probe = lambda h, p: _port_open(h, p, timeout=1.0)  # noqa: E731
+        ports_desc = "PLAGE COMPLÈTE 1-65535"
+    else:
+        ports = sorted(set(DEFAULT_RECON_PORTS)
+                       | set(requested_ports(state.get("question", "") or ""))
+                       | set(requested_ports(state.get("target", "") or "")))
+        workers = 64
+        probe = _port_open
+        ports_desc = ",".join(map(str, ports))
     _vprint(f"Périmètre : {len(hosts)} hôte(s) à sonder → {hosts[:10]}{' …' if len(hosts) > 10 else ''}")
-    _vprint(f"Ports sondés ({len(ports)}) : {','.join(map(str, ports))}")
-    discover_services(world, hosts, ports, _port_open, _http_name, log=_vprint)
+    _vprint(f"Ports sondés ({len(ports)}, {workers} workers) : {ports_desc}")
+    discover_services(world, hosts, ports, probe, _http_name, log=_vprint, workers=workers)
     _found = [f"{s.host}:{s.port}/{s.name or '?'}" for h in world.in_scope_hosts() for s in h.services]
     _vprint(f"Services in-scope après découverte ({len(_found)}) : {_found or 'AUCUN'}")
     ctx = (f"OBJECTIF: reconnaître {target}. Pour CHAQUE service ouvert, appelle "
            f"report_finding(kind='service', host='{target}', service=<nom>, port=<port>).")
     agent = build_task_agent("network", world, ctx)
+    _ports_for_agent = ("la plage complète 1-65535" if full
+                        else f"les ports courants ({','.join(map(str, ports))})")
     query = (f"Scanne la cible {target}. Utilise nmap_scan si disponible, sinon tcp_port_check "
-             f"sur les ports courants ({','.join(map(str, ports))}). "
+             f"sur {_ports_for_agent}. "
              f"Remonte chaque service ouvert via report_finding.")
     try:
         result = agent.invoke({"messages": [("user", query)]})

@@ -245,3 +245,27 @@ def test_vprint_respects_verbose_flag(capsys):
     orch._vprint("visible")
     assert "visible" in capsys.readouterr().out
     orch.set_verbose(False)  # restaure l'état global
+
+
+def test_wants_full_scan_detects_phrases():
+    # Reconnaît une intention de balayage COMPLET ; ignore un port explicite ou le
+    # simple mot « tout » (périmètre) sans « ports ».
+    from orchestrator import wants_full_scan
+    assert wants_full_scan("scanne tous les ports") is True
+    assert wants_full_scan("fais un scan complet de 127.0.0.1") is True
+    assert wants_full_scan("attaque 127.0.0.1:8980") is False
+    assert wants_full_scan("analyse tout le périmètre autorisé") is False
+
+
+def test_discover_services_parallel_finds_open_ports():
+    # Sondage parallèle (workers>1) : trouve les mêmes ports ouverts, résultat
+    # déterministe, enregistrement séquentiel dans le WorldModel.
+    from orchestrator import discover_services
+    wm = WorldModel(scope=Scope.from_lines(["127.0.0.1/32"]))
+    opened = {22, 8980}
+    n = discover_services(wm, ["127.0.0.1"], [22, 80, 8980],
+                          probe=lambda h, p: p in opened,
+                          workers=4)
+    assert n == 2
+    ports_found = sorted(s.port for h in wm.in_scope_hosts() for s in h.services)
+    assert ports_found == [22, 8980]
