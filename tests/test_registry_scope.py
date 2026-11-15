@@ -69,3 +69,51 @@ def test_http_fingerprint_connects_to_validated_ip(tmp_path, monkeypatch):
     assert captured["host"] == "127.0.0.1"  # l'IP validée, jamais le hostname "box.htb"
     assert captured["headers"].get("Host") == "box.htb"  # vhost préservé dans l'en-tête
     assert "200" in out
+
+
+def test_http_get_returns_body(tmp_path, monkeypatch):
+    import tools.registry as reg
+    monkeypatch.setattr(reg, "AUDIT_LOG", str(tmp_path / "audit.log"))
+    monkeypatch.setattr(reg, "_validate_target", lambda t: "127.0.0.1")
+    captured = {}
+
+    class FakeResp:
+        status, reason = 200, "OK"
+        def read(self, n=-1): return b"<a href='creds.txt'>creds.txt</a>"
+
+    class FakeConn:
+        def __init__(self, host, port, timeout=None):
+            captured["host"] = host
+            captured["port"] = port
+        def request(self, method, path, headers=None):
+            captured["method"] = method
+            captured["path"] = path
+            captured["headers"] = headers or {}
+        def getresponse(self): return FakeResp()
+        def close(self): pass
+
+    monkeypatch.setattr(reg.http.client, "HTTPConnection", FakeConn)
+    from tools.registry import http_get
+    out = http_get.invoke({"url": "http://box.htb:8080/"})
+    assert captured["host"] == "127.0.0.1"   # l'IP validée, jamais le hostname
+    assert captured["port"] == 8080          # le port de l'URL est respecté
+    assert captured["method"] == "GET"
+    assert "creds.txt" in out                # le CORPS est renvoyé, pas juste les en-têtes
+
+
+def test_smb_list_shares_builds_argv(monkeypatch, local_scope):
+    from scope import set_active_scope
+    set_active_scope(local_scope)
+    import tools.registry as reg
+    captured = {}
+
+    def fake_run(cmd, timeout=120):
+        captured["cmd"] = cmd
+        return "Sharename      Type\n---------\nIPC$           IPC"
+
+    monkeypatch.setattr(reg, "_run", fake_run)
+    from tools.registry import smb_list_shares
+    out = smb_list_shares.invoke({"target": "127.0.0.1"})
+    assert captured["cmd"][0] == "smbclient" and "-L" in captured["cmd"]
+    assert "//127.0.0.1" in captured["cmd"]
+    assert "IPC$" in out

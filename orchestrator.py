@@ -1,5 +1,6 @@
 import os
 import re
+import shutil
 from typing import TypedDict, List, Dict, Any, Literal
 from dotenv import load_dotenv
 from langchain_anthropic import ChatAnthropic
@@ -24,9 +25,15 @@ _MISSIONS: Dict[str, WorldModel] = {}
 
 
 def start_mission(thread_id: str, scope) -> WorldModel:
-    """Crée (ou recrée) le modèle du terrain d'une mission et l'enregistre."""
-    world = WorldModel(scope=scope)
-    _MISSIONS[thread_id] = world
+    """Crée le modèle du terrain d'une mission, ou RÉUTILISE celui déjà associé au
+    thread_id (reprise : ledger + trouvailles préservés). Le périmètre fraîchement
+    chargé est ré-appliqué dans tous les cas."""
+    world = _MISSIONS.get(thread_id)
+    if world is None:
+        world = WorldModel(scope=scope)
+        _MISSIONS[thread_id] = world
+    else:
+        world.scope = scope
     return world
 
 
@@ -72,6 +79,34 @@ SERVICE_DOMAIN = {
     "http": "web", "https": "web",
     "smb": "ad", "netbios": "ad", "ldap": "ad",
 }
+
+# Outils Python toujours présents (pas de binaire externe). Toute technique dont
+# le `tool` n'est PAS ici est considérée comme dépendante d'un binaire externe,
+# vérifié via shutil.which (cf. technique_available / escalade « outil manquant »).
+PYTHON_TOOLS = {
+    "tcp_port_check", "http_fingerprint", "http_get", "smb_port_probe",
+    "scope_check", "log_audit_event", "report_finding",
+}
+
+
+def technique_available(tech) -> bool:
+    """Vrai si la technique peut s'exécuter ici : outil Python intégré, aucun
+    outil requis, ou binaire externe présent dans le PATH. Déterministe (sans LLM)."""
+    tool = (getattr(tech, "tool", "") or "").strip()
+    if not tool or tool in PYTHON_TOOLS:
+        return True
+    return shutil.which(tool) is not None
+
+
+def _render_template(template: str, host: str, port: int = 0) -> str:
+    """Rend un gabarit de commande avec {target}/{port}. Un placeholder inconnu
+    (ex. {user}, {hash}) renvoie le gabarit brut, sans lever."""
+    if not template:
+        return ""
+    try:
+        return template.format(target=host, port=port)
+    except (KeyError, IndexError, ValueError):
+        return template
 
 
 # Marqueurs qui DISQUALIFIENT une ligne « open » (port testé mais pas ouvert).
@@ -213,13 +248,15 @@ def plan_tasks(world: WorldModel, catalog: list) -> List[Dict[str, Any]]:
     sont satisfaits et qui ne sont pas déjà tentées avec les mêmes entrées."""
     tasks: List[Dict[str, Any]] = []
     for host in world.in_scope_hosts():
-        services = sorted({svc.name for svc in host.services if svc.name})
-        for service in services:
+        for svc in host.services:
+            service = svc.name
+            if not service:
+                continue
             for tech in techniques_for(catalog, service):
                 if not _requires_satisfied(world, host.ip, service, tech.requires):
                     continue
                 fp = _task_inputs_fp(world, service, tech.requires)
-                if world.is_tried(host.ip, service, tech.id, fp):
+                if world.is_tried(host.ip, service, tech.id, fp, port=svc.port):
                     continue
                 tasks.append({
                     "host": host.ip,
@@ -227,6 +264,7 @@ def plan_tasks(world: WorldModel, catalog: list) -> List[Dict[str, Any]]:
                     "technique_id": tech.id,
                     "domain": tech.domain,
                     "inputs_fp": fp,
+                    "port": svc.port,
                 })
     return tasks
 
@@ -316,25 +354,39 @@ def node_decide(state: MissionState, config):
 
 
 def node_execute(state: MissionState, config):
-    from agents.dynamic_agent import build_task_agent
     thread_id = config["configurable"]["thread_id"]
     world = get_world(thread_id)
     reports: List[Dict[str, Any]] = []
     for task in state.get("planned", []):
         tech = technique_by_id(_CATALOG, task["technique_id"])
+        port = int(task.get("port", 0) or 0)
+        inputs_fp = task.get("inputs_fp", "")
+        # Escalade « outil manquant » (Option Y) : outil requis absent ⇒ on
+        # n'exécute pas, on signale, et on NE marque PAS la technique (elle reste
+        # replanifiable après installation de l'outil + relance de la mission).
+        if not technique_available(tech):
+            msg = f"Outil requis absent : {tech.tool}"
+            world.add_evidence({"kind": "tool_request", "tool": tech.tool,
+                                "technique": tech.id, "host": task["host"]})
+            reports.append({"technique": tech.id, "host": task["host"],
+                            "service": task["service"], "port": port, "inputs_fp": inputs_fp,
+                            "status": "blocked_missing_tool", "tool": tech.tool, "detail": msg})
+            continue
+        from agents.dynamic_agent import build_task_agent
         domain = SERVICE_DOMAIN.get(task["service"], tech.domain or "network")
         creds = world.creds_applicable(task["service"])
+        rendered = _render_template(tech.command_template, task["host"], port)
         ctx = (f"OBJECTIF: exécuter la technique '{tech.id}' ({tech.name}) sur "
-               f"{task['host']} / service {task['service']}, DANS le périmètre. "
+               f"{task['host']}:{port} / service {task['service']}, DANS le périmètre. "
                f"Outil attendu: {tech.tool or '(outils fournis)'}. "
-               f"Gabarit: {tech.command_template or '(aucun gabarit — utilise les outils fournis)'}. "
+               f"Commande: {rendered or '(aucun gabarit — utilise les outils fournis)'}. "
                f"Signal de succès: {tech.success_signal or '(aucun)'}. "
                f"CREDS applicables: {[c.principal for c in creds] or 'aucun'}. "
                f"RAG: {(state.get('rag_context') or '')[:800]}. "
                f"Remonte toute trouvaille via report_finding.")
         agent = build_task_agent(domain, world, ctx)
-        query = (f"Exécute la technique {tech.id} sur {task['host']} ({task['service']}). "
-                 + (f"Gabarit de commande: {tech.command_template}" if tech.command_template else ""))
+        query = (f"Exécute la technique {tech.id} sur {task['host']}:{port} ({task['service']}). "
+                 + (f"Commande: {rendered}" if rendered else ""))
         try:
             result = agent.invoke({"messages": [("user", query)]})
             raw = result["messages"][-1].content
@@ -344,25 +396,37 @@ def node_execute(state: MissionState, config):
             status = "error"
         world.add_evidence({"phase": "execute", "technique": tech.id, "host": task["host"], "raw": raw})
         reports.append({"technique": tech.id, "host": task["host"], "service": task["service"],
-                        "status": status, "detail": raw})
+                        "port": port, "inputs_fp": inputs_fp, "status": status, "detail": raw})
     return {"execution_reports": reports}
 
 
 def node_integrate(state: MissionState, config):
     thread_id = config["configurable"]["thread_id"]
     world = get_world(thread_id)
-    # Marque les techniques tentées ce cycle (clé par entrées, cf. R2).
-    for task in state.get("planned", []):
-        world.mark_technique(task["host"], task["service"], task["technique_id"],
-                             task.get("inputs_fp", ""), status="tried")
+    reports = state.get("execution_reports", [])
+    # Ne marque « tentée » que ce qui a RÉELLEMENT tourné (done/error). Une
+    # technique bloquée par un outil manquant n'est pas grillée : elle reste
+    # replanifiable après installation + relance (Option Y). Clé par (entrées, port).
+    for report in reports:
+        if report.get("status") in ("done", "error"):
+            world.mark_technique(report["host"], report["service"], report["technique"],
+                                 report.get("inputs_fp", ""), status="tried",
+                                 port=int(report.get("port", 0) or 0))
     # Back-stop R1 : récupère creds/hosts dans les sorties brutes.
     added = 0
-    for report in state.get("execution_reports", []):
+    for report in reports:
         added += reconcile_evidence(world, report.get("detail", ""))
     cycle = state.get("cycle", 0) + 1
     summary = (f"Mission (cycle {cycle}) : {len(world.in_scope_hosts())} hôte(s) in-scope, "
                f"{len(world.credentials)} credential(s), {len(world.sessions)} session(s), "
                f"{len(world.loot)} butin(s). +{added} trouvaille(s) récupérée(s) du texte brut ce cycle.")
+    # Escalade « outil manquant » (Option Y) : liste les binaires à installer.
+    missing = sorted({r.get("tool", "") for r in reports
+                      if r.get("status") == "blocked_missing_tool" and r.get("tool")})
+    if missing:
+        hints = " ; ".join(f"{t} (`sudo apt install -y {t}`)" for t in missing)
+        summary += ("\n⚠ Techniques en attente d'un outil absent : " + hints +
+                    ". Installe-le(s) dans l'environnement (Kali) puis relance la même mission pour les débloquer.")
     print(f"[MISSION] Intégration : {summary}")
     return {"cycle": cycle, "final_response": summary}
 
@@ -377,9 +441,15 @@ def route_after_integrate(state: MissionState) -> Literal["continue", "finish"]:
         return "finish"
     thread_id = state.get("thread_id")
     world = _MISSIONS.get(thread_id) if thread_id else None
-    if world is not None and not plan_tasks(world, _CATALOG):
-        print("\n[MISSION] Épuisement : plus aucune tâche planifiable in-scope — fin.")
-        return "finish"
+    if world is not None:
+        # On ne continue QUE s'il reste une tâche réellement EXÉCUTABLE. Les tâches
+        # bloquées par un outil absent sont signalées mais ne font pas tourner la
+        # boucle à vide jusqu'au cap de cycles (cf. escalade Option Y).
+        runnable = [t for t in plan_tasks(world, _CATALOG)
+                    if technique_available(technique_by_id(_CATALOG, t["technique_id"]))]
+        if not runnable:
+            print("\n[MISSION] Épuisement : plus aucune tâche exécutable in-scope — fin.")
+            return "finish"
     return "continue"
 
 

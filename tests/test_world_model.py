@@ -62,3 +62,12 @@ def test_out_of_scope_host_trace_escapes_newline():
     assert audit.count("\n") == 1 and audit.endswith("\n")  # une seule ligne, pas deux
     assert "\\n" in audit                                    # le saut de ligne est échappé
     assert "| OUT_OF_SCOPE |" in audit
+
+
+def test_ledger_distinguishes_port():
+    # Deux services de même nom sur des ports différents ne doivent pas se
+    # confondre dans le ledger : marquer l'un ne marque pas l'autre.
+    wm = _wm()
+    wm.mark_technique("10.10.10.5", "http", "http.get", inputs_fp="", port=80)
+    assert wm.is_tried("10.10.10.5", "http", "http.get", inputs_fp="", port=80) is True
+    assert wm.is_tried("10.10.10.5", "http", "http.get", inputs_fp="", port=8080) is False

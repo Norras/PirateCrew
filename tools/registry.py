@@ -194,6 +194,38 @@ def http_fingerprint(url: str) -> str:
             f"En-têtes révélateurs : {revelateurs or '(aucun)'}")
 
 
+@tool
+def http_get(url: str) -> str:
+    """Récupère le CORPS d'une URL AUTORISÉE (requête GET), borné à 64 Ko, avec le
+    code de statut. Permet de LIRE un listing de répertoire ou un fichier servi
+    (contrairement à http_fingerprint qui ne renvoie que les en-têtes). Préfixe
+    http:// si le schéma est absent. Stdlib uniquement."""
+    if not url.startswith(("http://", "https://")):
+        url = "http://" + url
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    ip = _validate_target(host)  # filtre + périmètre ; on contacte l'IP VÉRIFIÉE
+    _audit("HTTP_GET", url)
+    is_https = parsed.scheme == "https"
+    conn_cls = http.client.HTTPSConnection if is_https else http.client.HTTPConnection
+    port = parsed.port or (443 if is_https else 80)
+    path = parsed.path or "/"
+    if parsed.query:
+        path += "?" + parsed.query
+    try:
+        conn = conn_cls(ip, port, timeout=8)
+        conn.request("GET", path, headers={"Host": host})
+        resp = conn.getresponse()
+        status, reason = resp.status, resp.reason
+        body = resp.read(65536)  # corps borné : évite d'ingérer un fichier énorme
+        conn.close()
+    except Exception as exc:  # noqa: BLE001 - on rapporte toute erreur réseau proprement
+        return f"Échec de la connexion à {url} ({type(exc).__name__}: {exc})"
+    text = (body.decode("utf-8", errors="replace")
+            if isinstance(body, (bytes, bytearray)) else str(body))
+    return f"{url} → HTTP {status} {reason}\n{text}"
+
+
 # --------------------------------------------------------------------------- #
 # Domaine : ad (Active Directory / SMB)
 # --------------------------------------------------------------------------- #
@@ -219,6 +251,18 @@ def smb_port_probe(target: str) -> str:
         piste = ("\nSMB exposé → pistes d'énumération AUTORISÉE : sessions nulles, listing de partages, "
                  "énumération d'utilisateurs (ex. enum4linux, smbclient -L). Aucune exploitation automatique.")
     return f"SMB/NetBIOS sur {target} : {resume}{piste}"
+
+
+@tool
+def smb_list_shares(target: str) -> str:
+    """Liste les partages SMB d'une cible AUTORISÉE via `smbclient` (session nulle, -N).
+    Nécessite le binaire `smbclient` (présent sous Kali). Énumération AUTORISÉE
+    uniquement ; aucune écriture, aucune exploitation."""
+    try:
+        target = _validate_target(target)
+    except ScopeError as exc:
+        return f"{target} → hors périmètre d'autorisation, listing refusé ({exc})"
+    return _run(["smbclient", "-L", f"//{target}", "-N"], timeout=60)
 
 
 # --------------------------------------------------------------------------- #
@@ -276,6 +320,6 @@ MANDATORY_TOOLS = [log_audit_event, scope_check]
 
 TOOL_CATALOG = {
     "network": [nmap_scan, tcp_port_check],
-    "web": [http_fingerprint],
-    "ad": [smb_port_probe],
+    "web": [http_fingerprint, http_get],
+    "ad": [smb_port_probe, smb_list_shares],
 }

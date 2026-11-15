@@ -5,6 +5,15 @@
   service: http
   requires: []
   tool: http_fingerprint
-  command_template: ""
+  command_template: "http_fingerprint http://{target}:{port}/"
+  success_signal: "HTTP"
+  provided_by: builtin
+- id: http.get
+  name: Lecture de contenu HTTP (corps, listing de répertoire, fichier servi)
+  domain: web
+  service: http
+  requires: []
+  tool: http_get
+  command_template: "http_get http://{target}:{port}/"
   success_signal: "HTTP"
   provided_by: builtin

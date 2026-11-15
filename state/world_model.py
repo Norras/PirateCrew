@@ -74,7 +74,7 @@ class WorldModel:
     loot: list[dict] = field(default_factory=list)
     sessions: list[Session] = field(default_factory=list)
     evidence: list[dict] = field(default_factory=list)
-    technique_ledger: dict[tuple[str, str, str, str], str] = field(default_factory=dict)
+    technique_ledger: dict[tuple[str, str, str, str, int], str] = field(default_factory=dict)
 
     # ------------------------------------------------------------------ #
     # Hôtes / services
@@ -146,12 +146,12 @@ class WorldModel:
     # Ledger des techniques tentées (clé par entrées, cf. inputs_fingerprint)
     # ------------------------------------------------------------------ #
     def mark_technique(self, host: str, service: str, tech_id: str,
-                       inputs_fp: str = "", status: str = "tried") -> None:
-        self.technique_ledger[(host, service, tech_id, inputs_fp)] = status
+                       inputs_fp: str = "", status: str = "tried", port: int = 0) -> None:
+        self.technique_ledger[(host, service, tech_id, inputs_fp, port)] = status
 
     def is_tried(self, host: str, service: str, tech_id: str,
-                 inputs_fp: str = "") -> bool:
-        return (host, service, tech_id, inputs_fp) in self.technique_ledger
+                 inputs_fp: str = "", port: int = 0) -> bool:
+        return (host, service, tech_id, inputs_fp, port) in self.technique_ledger
 
     # ------------------------------------------------------------------ #
     # Vues
