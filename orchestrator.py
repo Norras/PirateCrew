@@ -10,6 +10,7 @@ from langgraph.checkpoint.memory import MemorySaver
 
 from scope import load_scope, set_active_scope, ScopeError
 from state.world_model import WorldModel, Credential, inputs_fingerprint
+from state import mission_io
 from catalog import load_catalog, techniques_for, technique_by_id
 
 load_dotenv()
@@ -462,18 +463,18 @@ def node_recon(state: MissionState, config):
         # ports filtrés feraient traîner le cycle jusqu'au bout des timeouts).
         ports = list(range(1, 65536))
         workers = 256
-        probe = lambda h, p: _port_open(h, p, timeout=1.0)  # noqa: E731
         ports_desc = "PLAGE COMPLÈTE 1-65535"
     else:
         ports = sorted(set(DEFAULT_RECON_PORTS)
                        | set(requested_ports(state.get("question", "") or ""))
                        | set(requested_ports(state.get("target", "") or "")))
         workers = 64
-        probe = _port_open
         ports_desc = ",".join(map(str, ports))
     _vprint(f"Périmètre : {len(hosts)} hôte(s) à sonder → {hosts[:10]}{' …' if len(hosts) > 10 else ''}")
     _vprint(f"Ports sondés ({len(ports)}, {workers} workers) : {ports_desc}")
-    discover_services(world, hosts, ports, probe, _http_name, log=_vprint, workers=workers)
+    # Découverte auto-escaladante (plage complète si les ports par défaut sont vides).
+    probe = lambda h, p: _port_open(h, p, timeout=1.0)  # noqa: E731
+    autonomous_discovery(world, hosts, ports, probe, _http_name, log=_vprint)
     _found = [f"{s.host}:{s.port}/{s.name or '?'}" for h in world.in_scope_hosts() for s in h.services]
     _vprint(f"Services in-scope après découverte ({len(_found)}) : {_found or 'AUCUN'}")
     ctx = (f"OBJECTIF: reconnaître {target}. Pour CHAQUE service ouvert, appelle "
@@ -594,6 +595,8 @@ def node_integrate(state: MissionState, config):
         summary += ("\n⚠ Techniques en attente d'un outil absent : " + hints +
                     ". Installe-le(s) dans l'environnement (Kali) puis relance la même mission pour les débloquer.")
     print(f"[MISSION] Intégration : {summary}")
+    # Persistance à chaque cycle : les trouvailles survivent à un crash/interruption.
+    mission_io.save_world(world, thread_id)
     return {"cycle": cycle, "final_response": summary}
 
 
@@ -690,8 +693,6 @@ if __name__ == "__main__":
     else:
         print("Astuce : tapez « verbose » pour activer les diagnostics détaillés (ports/services/tâches).")
 
-    config = {"configurable": {"thread_id": "session_pirate_master"}}
-
     while True:
         try:
             user_input = input("\nVous > ")
@@ -715,11 +716,15 @@ if __name__ == "__main__":
             _ipm = re.search(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", user_input)
             target = _ipm.group(0) if _ipm else "127.0.0.1"
 
+            # Identité de mission : un mission_id par exécution = thread_id.
+            mission_id = mission_io.new_mission_id(target)
+            config = {"configurable": {"thread_id": mission_id}}
+
             initial_state = {
                 "question": user_input,
                 "target": target,
                 "goal": user_input,
-                "thread_id": "session_pirate_master",
+                "thread_id": mission_id,
                 "cycle": 0,
                 "max_cycles": 6,
                 "discovered_services": [],
@@ -729,7 +734,16 @@ if __name__ == "__main__":
                 "final_response": "",
             }
 
-            result = master_orchestrator.invoke(initial_state, config=config)
+            result = {}
+            try:
+                result = master_orchestrator.invoke(initial_state, config=config)
+            finally:
+                # Garantit world.json + rapport même sur Ctrl-C / exception.
+                w = _MISSIONS.get(mission_id)
+                if w is not None:
+                    mission_io.save_world(w, mission_id)
+                    report_path = mission_io.save_report(w, mission_id)
+                    print(f"\n[MISSION] Rapport : {report_path}")
             print(f"\nPirateCrew >\n{result.get('final_response', 'Aucune réponse générée.')}")
         except KeyboardInterrupt:
             print("\nInterruption. Sortie.")

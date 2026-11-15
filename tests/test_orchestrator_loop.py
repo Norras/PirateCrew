@@ -290,3 +290,14 @@ def test_autonomous_discovery_no_escalation_when_service_found():
     autonomous_discovery(wm, ["127.0.0.1"], [80], probe=probe)
     ports = sorted(s.port for h in wm.in_scope_hosts() for s in h.services)
     assert ports == [80]  # pas d'escalade → 50000 jamais sondé/enregistré
+
+
+def test_node_integrate_persists_world_each_cycle(tmp_path, monkeypatch):
+    import orchestrator as orch
+    from state import mission_io
+    monkeypatch.setattr(mission_io, "MISSIONS_ROOT", tmp_path)
+    sc = Scope.from_lines(["127.0.0.1/32"])
+    orch.start_mission("mX", sc)
+    state = {"execution_reports": [], "cycle": 0, "thread_id": "mX"}
+    orch.node_integrate(state, {"configurable": {"thread_id": "mX"}})
+    assert (tmp_path / "mX" / "world.json").exists()
