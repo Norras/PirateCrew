@@ -1,5 +1,6 @@
 from scope import Scope
-from state.world_model import WorldModel, Credential, inputs_fingerprint
+import json
+from state.world_model import WorldModel, Credential, Session, inputs_fingerprint
 
 
 def _wm():
@@ -71,3 +72,23 @@ def test_ledger_distinguishes_port():
     wm.mark_technique("10.10.10.5", "http", "http.get", inputs_fp="", port=80)
     assert wm.is_tried("10.10.10.5", "http", "http.get", inputs_fp="", port=80) is True
     assert wm.is_tried("10.10.10.5", "http", "http.get", inputs_fp="", port=8080) is False
+
+
+def test_session_authorized_default_false():
+    assert Session(host="10.10.10.5", channel="ssh").authorized is False
+
+
+def test_to_dict_is_json_serialisable_with_ledger_and_secrets():
+    wm = _wm()
+    wm.add_service("10.10.10.5", 445, name="smb")
+    wm.add_credential(Credential(kind="password", principal="admin", secret="pw123"))
+    wm.add_session(Session(host="10.10.10.5", channel="evil-winrm"))
+    wm.mark_technique("10.10.10.5", "smb", "smb.enum_shares", inputs_fp="", status="tried", port=445)
+    d = wm.to_dict()
+    json.dumps(d)  # ne doit pas lever (clés tuple du ledger converties)
+    assert d["technique_ledger"] == [
+        {"host": "10.10.10.5", "service": "smb", "technique": "smb.enum_shares",
+         "inputs_fp": "", "port": 445, "status": "tried"}
+    ]
+    assert d["credentials"][0]["secret"] == "pw123"  # clair
+    assert d["sessions"][0]["authorized"] is False

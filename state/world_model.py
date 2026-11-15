@@ -13,7 +13,7 @@ hôtes (in_scope / hors-liste) et n'importe jamais le paquet `tools`
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 
 import scope
@@ -52,6 +52,7 @@ class Session:
     via_cred: str | None = None
     alive: bool = True
     handle: str = ""
+    authorized: bool = False  # session obtenue via une action explicitement autorisée
 
 
 def inputs_fingerprint(inputs: dict) -> str:
@@ -75,6 +76,24 @@ class WorldModel:
     sessions: list[Session] = field(default_factory=list)
     evidence: list[dict] = field(default_factory=list)
     technique_ledger: dict[tuple[str, str, str, str, int], str] = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        """Instantané JSON-sérialisable du modèle (secrets en clair).
+
+        Le ledger, clé par tuple, devient une liste d'entrées nommées.
+        """
+        return {
+            "hosts": {ip: asdict(h) for ip, h in self.hosts.items()},
+            "credentials": [asdict(c) for c in self.credentials],
+            "loot": list(self.loot),
+            "sessions": [asdict(s) for s in self.sessions],
+            "evidence": list(self.evidence),
+            "technique_ledger": [
+                {"host": h, "service": svc, "technique": t,
+                 "inputs_fp": fp, "port": port, "status": status}
+                for (h, svc, t, fp, port), status in self.technique_ledger.items()
+            ],
+        }
 
     # ------------------------------------------------------------------ #
     # Hôtes / services
