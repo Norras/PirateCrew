@@ -103,3 +103,52 @@ def test_promote_metadata_omits_target_mission_id():
     meta = s.calls[0][1][0]
     assert "mission_id" not in meta            # champ retiré
     assert "10.0.0.5" not in str(meta)         # aucune IP cible en metadata
+
+
+def test_promote_skips_unknown_nt_hash_literal():
+    # hash NT inconnu (non reconcilié) inliné par le LLM -> rejeté (entropie + flag)
+    raw = json.dumps({"id": "llm.smb.h", "name": "pth", "service": "smb", "tool": "impacket-wmiexec",
+                      "command_template": "impacket-wmiexec -hashes :31d6cfe0d16ae931b73c59d7e0c089c0 {user}@{target}",
+                      "success_signal": "ok"})
+    t = author.author_technique("smb", "ctx", llm_invoke=lambda p: raw)
+    s = _FakeStore()
+    assert author.promote_techniques_to_rag([t], "m1", store=s) == 0   # forbidden vide
+    assert s.calls == []
+
+
+def test_promote_skips_literal_credential_flag_value():
+    # secret inconnu, basse entropie, en position de flag credential -> contrôle structurel
+    raw = json.dumps({"id": "llm.smb.p", "name": "brute", "service": "smb", "tool": "crackmapexec",
+                      "command_template": "crackmapexec smb {target} -u {user} -p hunter2", "success_signal": "ok"})
+    t = author.author_technique("smb", "ctx", llm_invoke=lambda p: raw)
+    s = _FakeStore()
+    assert author.promote_techniques_to_rag([t], "m1", store=s) == 0
+    assert s.calls == []
+
+
+def test_promote_scans_all_persisted_fields_not_subset():
+    # IP dans `tool` (champ persisté hors des 4 scannés initialement) -> rejeté
+    raw = json.dumps({"id": "llm.smb.t", "name": "x", "service": "smb", "tool": "scanner-10.0.0.5",
+                      "command_template": "run {target}", "success_signal": "ok"})
+    t = author.author_technique("smb", "ctx", llm_invoke=lambda p: raw)
+    s = _FakeStore()
+    assert author.promote_techniques_to_rag([t], "m1", store=s) == 0
+    assert s.calls == []
+
+
+def test_promote_skips_compressed_ipv6_literal():
+    raw = json.dumps({"id": "llm.x.6", "name": "x", "service": "smb", "tool": "nmap",
+                      "command_template": "nmap -6 fe80::1", "success_signal": "ok"})
+    t = author.author_technique("smb", "ctx", llm_invoke=lambda p: raw)
+    s = _FakeStore()
+    assert author.promote_techniques_to_rag([t], "m1", store=s) == 0
+    assert s.calls == []
+
+
+def test_promote_allows_timestamp_in_success_signal():
+    # régression du faux positif IPv6-ish : HH:MM:SS ne doit PAS bloquer la promotion
+    raw = json.dumps({"id": "llm.ok.ts", "name": "x", "service": "smb", "tool": "crackmapexec",
+                      "command_template": "crackmapexec smb {target} -u {user}", "success_signal": "session at 10:30:00"})
+    t = author.author_technique("smb", "ctx", llm_invoke=lambda p: raw)
+    s = _FakeStore()
+    assert author.promote_techniques_to_rag([t], "m1", store=s) == 1

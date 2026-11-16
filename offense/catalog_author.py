@@ -11,7 +11,7 @@ from pathlib import Path
 import yaml
 
 from catalog.loader import Technique, _technique_from_dict
-from offense.guardrails import destructive_match, shell_metachar
+from offense.guardrails import GuardrailError, destructive_match, shell_metachar, tokenize_argv
 from state.mission_io import mission_dir
 
 
@@ -84,49 +84,82 @@ def persist_llm_technique(tech: Technique, mission_id: str, root=None) -> Path:
 
 
 _IP_LITERAL = re.compile(
-    r"\b\d{1,3}(?:\.\d{1,3}){3}\b"                   # IPv4
-    r"|(?:[0-9A-Fa-f]{1,4}:){2,}[0-9A-Fa-f]{0,4}"    # IPv6-ish (>=2 groupes, volontairement large)
+    r"\b\d{1,3}(?:\.\d{1,3}){3}\b"                      # IPv4
+    r"|::[0-9A-Fa-f]{0,4}"                               # IPv6 compressé (::1, fe80::1)
+    r"|(?:[0-9A-Fa-f]{1,4}:){4,}[0-9A-Fa-f]{0,4}"        # IPv6 non compressé / MAC (>=4 groupes)
 )
+
+# Jeton à forte entropie : empreinte/hash/clé/token probable. Volontairement
+# large (fail-closed) : hex >=16, ou base64/alnum >=24.
+_HIGH_ENTROPY = re.compile(r"\b[0-9A-Fa-f]{16,}\b|\b[A-Za-z0-9+/]{24,}={0,2}")
+
+# Flags portant une valeur de credential : leur valeur DOIT être un {placeholder},
+# jamais un littéral (sinon le gabarit est spécifique à la mission).
+_CRED_FLAGS = frozenset({"-p", "--password", "--pass", "-passwd", "-pw",
+                         "-H", "-hashes", "--hashes", "--hash",
+                         "-u", "--user", "--username"})
 
 
 def _carries_target_data(text: str, forbidden) -> bool:
-    """Vrai si `text` porte un littéral de cible : une IP, ou l'une des chaînes
-    interdites (secrets/principals de la mission). Fail-closed : en cas de doute
-    on renvoie True (la technique ne sera pas persistée dans le RAG partagé)."""
-    if _IP_LITERAL.search(text):
+    """Vrai si `text` porte une donnée de cible : IP littérale, jeton à forte
+    entropie (hash/clé/token), ou une chaîne interdite (secret/principal connu,
+    comparaison insensible à la casse). Fail-closed : en cas de doute, True."""
+    if _IP_LITERAL.search(text) or _HIGH_ENTROPY.search(text):
         return True
-    return any(bad and len(bad) >= 3 and bad in text for bad in forbidden)
+    low = text.lower()
+    return any(bad and len(bad) >= 3 and bad.lower() in low for bad in forbidden)
+
+
+def _flag_value_is_literal(template: str) -> bool:
+    """Vrai si un flag porteur de credential est suivi d'une valeur littérale
+    (pas un {placeholder}) — gabarit spécifique à la mission, non réutilisable."""
+    try:
+        argv = tokenize_argv(template)
+    except GuardrailError:
+        return True  # non tokenisable → fail-closed
+    return any(argv[i] in _CRED_FLAGS and "{" not in argv[i + 1]
+               for i in range(len(argv) - 1))
 
 
 def promote_techniques_to_rag(techniques, mission_id: str, forbidden=(), store=None) -> int:
     """Promeut les techniques rédigées par l'auteur LLM dans le RAG partagé.
 
-    Fail-closed : une technique dont un champ persisté (id/name/command_template/
-    success_signal) porte un littéral de cible — une IP, ou un secret/principal
-    de la mission listé dans `forbidden` — n'est PAS persistée : elle est
-    spécifique à la mission, pas une connaissance réutilisable. Ainsi aucune
-    donnée de la cible n'entre dans le store partagé (ni sortie d'exécution, ni
-    credential, ni IP). `mission_id` est accepté mais volontairement ABSENT de
-    la metadata (il contient l'IP cible). Id stable = hash(service|gabarit) →
-    upsert idempotent. `store=None` → import paresseux du vectorstore. Renvoie
-    le nombre promu.
+    Fail-closed, invariant code-enforcé : une technique n'est persistée QUE si
+    rien de ce qui serait écrit (page_content complet + metadata) ne porte de
+    donnée de cible. Est rejetée (skip) toute technique dont ce contenu contient
+    une IP littérale, un jeton à forte entropie (hash/clé/token, même inconnu),
+    ou une chaîne de `forbidden` (secrets/principals connus, insensible à la
+    casse) ; et toute technique dont le `command_template` met une valeur
+    LITTÉRALE après un flag de credential (-p/-H/-u/…) au lieu d'un {placeholder}.
+    `mission_id` est accepté mais volontairement ABSENT de la metadata (il
+    contient l'IP cible). Id stable = hash(service|gabarit) → upsert idempotent.
+    `store=None` → import paresseux du vectorstore. Renvoie le nombre promu.
+
+    Résiduel assumé (documenté) : un secret en position exotique — userinfo
+    d'URL (user:pass@h), en-tête (-H "Authorization: …"), argument positionnel,
+    ou valeur attachée (--password=…) — ou de moins de 3 caractères, n'est pas
+    systématiquement capté.
     """
     if not techniques:
         return 0
     texts, metadatas, ids = [], [], []
     for t in techniques:
-        blob = " ".join(str(x or "") for x in (t.id, t.name, t.command_template, t.success_signal))
-        if _carries_target_data(blob, forbidden):
-            continue  # spécifique à la mission → jamais dans le RAG partagé
         reqs = ", ".join(sorted(t.requires)) if t.requires else "aucun"
-        texts.append(
+        text = (
             f"Technique « {t.name} » pour le service {t.service} "
             f"(outil {t.tool or '?'}). Commande : {t.command_template}. "
             f"Signal de succès : {t.success_signal or '?'}. Prérequis : {reqs}. "
             f"Ouvre une session : {t.opens_session}. Source : auteur LLM."
         )
-        metadatas.append({"source": "llm_authored", "service": t.service,
-                          "technique_id": t.id, "tool": t.tool or ""})
+        meta = {"source": "llm_authored", "service": t.service,
+                "technique_id": t.id, "tool": t.tool or ""}
+        # Scan de TOUT le contenu persisté (page_content + metadata), pas d'un
+        # sous-ensemble de champs : aucune donnée de cible ne doit s'y glisser.
+        scanned = text + " " + " ".join(str(v) for v in meta.values())
+        if _carries_target_data(scanned, forbidden) or _flag_value_is_literal(t.command_template):
+            continue  # spécifique à la mission → jamais dans le RAG partagé
+        texts.append(text)
+        metadatas.append(meta)
         digest = hashlib.sha1(
             f"{t.service}|{t.command_template}".encode("utf-8")).hexdigest()[:16]
         ids.append(f"llm:{digest}")

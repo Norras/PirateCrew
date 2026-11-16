@@ -51,9 +51,24 @@ def test_author_context_tronque_les_sorties_longues():
     w = WorldModel(scope=Scope.from_lines(["10.0.0.0/24"]))
     w.add_service("10.0.0.5", 445, name="smb")
     w.mark_technique("10.0.0.5", "smb", "t", status="tried", port=445)
-    w.add_evidence({"phase": "execute", "technique": "t", "host": "10.0.0.5", "raw": "X" * 5000})
+    # long mais à basse entropie (espaces) pour tester la troncature, pas le masquage
+    w.add_evidence({"phase": "execute", "technique": "t", "host": "10.0.0.5", "raw": "echec " * 1000})
     ctx = _author_context(w, "smb")
-    assert "X" * 200 in ctx and "X" * 400 not in ctx
+    assert "echec echec" in ctx        # début de l'extrait présent
+    assert ctx.count("echec") < 60     # tronqué (pas les 1000 occurrences)
+
+
+def test_author_context_masks_high_entropy_unknown_hash():
+    from orchestrator import _author_context
+    w = WorldModel(scope=Scope.from_lines(["10.0.0.0/24"]))
+    w.add_service("10.0.0.5", 445, name="smb")
+    w.mark_technique("10.0.0.5", "smb", "dump", status="tried", port=445)
+    # hash NT inconnu (jamais reconcilié en Credential) dans la sortie brute
+    w.add_evidence({"phase": "execute", "technique": "dump", "host": "10.0.0.5",
+                    "raw": "Administrator ::: 31d6cfe0d16ae931b73c59d7e0c089c0 :::"})
+    ctx = _author_context(w, "smb")   # aucun credential connu -> masquage par entropie
+    assert "31d6cfe0d16ae931b73c59d7e0c089c0" not in ctx
+    assert "***" in ctx
 
 
 def test_author_context_redacts_known_secret():

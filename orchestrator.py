@@ -625,11 +625,12 @@ def _already_authored(world: WorldModel, service: str) -> bool:
 
 
 def _redact(text: str, secrets) -> str:
-    """Masque (***) les secrets connus avant que le texte n'aille au LLM."""
+    """Masque (***) les secrets connus ET les jetons à forte entropie (hash/clé/
+    token, même inconnus) avant que le texte n'aille au LLM."""
     for s in secrets:
         if s and len(s) >= 3:
             text = text.replace(s, "***")
-    return text
+    return offense.catalog_author._HIGH_ENTROPY.sub("***", text)
 
 
 def _execute_excerpt(world: WorldModel, tech_id: str, host: str,
