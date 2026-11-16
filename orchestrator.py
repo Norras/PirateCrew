@@ -94,6 +94,26 @@ def get_world(thread_id: str) -> WorldModel:
     return world
 
 
+def _pending_sessions(world: WorldModel) -> List[Session]:
+    """Sessions vivantes obtenues mais pas encore autorisées par l'opérateur (gate)."""
+    return [s for s in world.sessions if s.alive and not s.authorized]
+
+
+def resume_with_authorization(prev_thread_id: str, host: str, target: str) -> str | None:
+    """Autorise les sessions de `host` dans le monde de `prev_thread_id` et prépare la
+    reprise : un nouveau thread_id pointe sur le MÊME objet WorldModel (registre, ledger
+    et session autorisée conservés). Renvoie le nouveau thread_id, ou None s'il n'y a
+    rien à autoriser. L'invoke LangGraph est fait par l'appelant (REPL)."""
+    world = _MISSIONS.get(prev_thread_id)
+    if world is None:
+        return None
+    if authorize_sessions(world, host) == 0:
+        return None
+    new_id = mission_io.new_mission_id(target)
+    _MISSIONS[new_id] = world
+    return new_id
+
+
 # --- 1. ÉTAT GLOBAL DE LA MISSION & DES REQUÊTES ---------------------------- #
 class MissionState(TypedDict, total=False):
     question: str
@@ -819,6 +839,8 @@ if __name__ == "__main__":
     else:
         print("Astuce : tapez « verbose » pour activer les diagnostics détaillés (ports/services/tâches).")
 
+    _last_mission_id, _last_target = None, None
+
     while True:
         try:
             user_input = input("\nVous > ")
@@ -838,12 +860,48 @@ if __name__ == "__main__":
                 print(f"[VERBOSE] mode {'activé' if is_verbose() else 'désactivé'}.")
                 continue
 
+            # Propose-only (auteur LLM : propose sans exécuter) : « propose-only [on|off] ».
+            if _parts[0] == "propose-only":
+                if len(_parts) == 1:
+                    set_propose_only(not is_propose_only())
+                else:
+                    set_propose_only(_parts[1] in ("on", "1", "true", "yes", "oui"))
+                print(f"[PROPOSE-ONLY] mode {'activé' if is_propose_only() else 'désactivé'}.")
+                continue
+
+            # Liste des sessions de la dernière mission.
+            if _parts[0] == "sessions":
+                _w = _MISSIONS.get(_last_mission_id) if _last_mission_id else None
+                if _w is None or not _w.sessions:
+                    print("[SESSIONS] aucune session.")
+                else:
+                    for _s in _w.sessions:
+                        _etat = "autorisée" if _s.authorized else "en attente"
+                        print(f"[SESSIONS] {_s.host} / {_s.channel} — {_etat}")
+                continue
+
             # Cible = première IP mentionnée dans la requête, sinon 127.0.0.1.
             _ipm = re.search(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", user_input)
-            target = _ipm.group(0) if _ipm else "127.0.0.1"
 
-            # Identité de mission : un mission_id par exécution = thread_id.
-            mission_id = mission_io.new_mission_id(target)
+            if _parts[0] == "authorize":
+                if not _ipm:
+                    print("[AUTHORIZE] usage : authorize <hôte (IPv4)>")
+                    continue
+                _host = _ipm.group(0)
+                new_id = (resume_with_authorization(_last_mission_id, _host, _last_target)
+                          if _last_mission_id else None)
+                if not new_id:
+                    print(f"[AUTHORIZE] aucune session en attente à autoriser pour {_host}.")
+                    continue
+                print(f"[AUTHORIZE] session(s) de {_host} autorisée(s) — reprise de la mission.")
+                _question = f"Lance la reprise post-exploitation de {_host} (audit/exploitation de la cible)"
+                mission_id, target = new_id, _last_target
+                user_input = _question
+            else:
+                target = _ipm.group(0) if _ipm else "127.0.0.1"
+                # Identité de mission : un mission_id par exécution = thread_id.
+                mission_id = mission_io.new_mission_id(target)
+            _last_mission_id, _last_target = mission_id, target
             config = {"configurable": {"thread_id": mission_id}}
 
             initial_state = {
@@ -878,6 +936,13 @@ if __name__ == "__main__":
                     except Exception as exc:
                         print(f"[MISSION] avertissement: persistance échouée ({type(exc).__name__})")
             print(f"\nPirateCrew >\n{result.get('final_response', 'Aucune réponse générée.')}")
+            # Gate session : remonte les sessions obtenues mais non autorisées.
+            _w = _MISSIONS.get(mission_id)
+            _pend = _pending_sessions(_w) if _w is not None else []
+            if _pend:
+                _liste = ", ".join(f"{s.host}/{s.channel}" for s in _pend)
+                print(f"⏸ Session(s) en attente d'autorisation : {_liste} — "
+                      f"tapez « authorize <hôte> » pour lancer la post-exploitation.")
         except KeyboardInterrupt:
             print("\nInterruption. Sortie.")
             break
