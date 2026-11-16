@@ -30,6 +30,32 @@ def test_route_finishes_on_cycle_cap():
     assert route_after_integrate({"cycle": 6, "max_cycles": 6}) == "finish"
 
 
+def test_author_context_rich():
+    from orchestrator import _author_context
+    w = WorldModel(scope=Scope.from_lines(["10.0.0.0/24"]))
+    w.add_service("10.0.0.5", 445, name="smb", version="Samba 4.15")
+    w.add_service("10.0.0.5", 80, name="http", version="nginx 1.25")
+    w.add_credential(Credential(kind="password", principal="CORP\\admin", secret="p@ss"))
+    w.mark_technique("10.0.0.5", "smb", "smb-brute", status="tried", port=445)
+    w.add_evidence({"phase": "execute", "technique": "smb-brute", "host": "10.0.0.5",
+                    "raw": "NT_STATUS_LOGON_FAILURE pour admin"})
+    ctx = _author_context(w, "smb")
+    assert "445" in ctx and "Samba 4.15" in ctx          # version + port du service visé
+    assert "http" in ctx                                  # service voisin
+    assert "CORP\\admin" in ctx and "p@ss" not in ctx     # principal oui, secret non
+    assert "smb-brute" in ctx and "LOGON_FAILURE" in ctx  # échec tenté + extrait du résultat
+
+
+def test_author_context_tronque_les_sorties_longues():
+    from orchestrator import _author_context
+    w = WorldModel(scope=Scope.from_lines(["10.0.0.0/24"]))
+    w.add_service("10.0.0.5", 445, name="smb")
+    w.mark_technique("10.0.0.5", "smb", "t", status="tried", port=445)
+    w.add_evidence({"phase": "execute", "technique": "t", "host": "10.0.0.5", "raw": "X" * 5000})
+    ctx = _author_context(w, "smb")
+    assert "X" * 200 in ctx and "X" * 400 not in ctx
+
+
 def test_integrate_captures_raw_evidence():
     wm = WorldModel(scope=Scope.from_lines(["10.10.10.0/24"]))
     n = reconcile_evidence(wm, "Found creds admin:Password1 on 10.10.10.5")

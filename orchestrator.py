@@ -624,6 +624,55 @@ def _already_authored(world: WorldModel, service: str) -> bool:
                for e in world.evidence)
 
 
+def _execute_excerpt(world: WorldModel, tech_id: str, host: str, limit: int = 200) -> str:
+    """Extrait tronqué de la dernière sortie d'exécution pour (tech_id, host)."""
+    raw = ""
+    for e in world.evidence:
+        if (e.get("phase") == "execute" and e.get("technique") == tech_id
+                and e.get("host") == host):
+            raw = e.get("raw", "") or ""
+    if not raw:
+        return "(pas de sortie capturée)"
+    return str(raw).replace("\n", " ").replace("\r", " ")[:limit]
+
+
+def _author_context(world: WorldModel, service: str) -> str:
+    """Contexte réel de la mission pour l'auteur LLM d'une technique sur `service`.
+
+    Assemble depuis le WorldModel : version(s)/port(s) du service visé sur les
+    hôtes in-scope, services voisins, principals des credentials applicables, et
+    les techniques déjà tentées pour ce service avec un extrait tronqué de leur
+    résultat. Jamais de secret en clair (principals uniquement) — ce texte part
+    au LLM, comme le contexte du chemin agent existant.
+    """
+    lines: List[str] = []
+    targets: List[str] = []
+    neighbors = set()
+    for h in world.in_scope_hosts():
+        for s in h.services:
+            if s.name == service:
+                targets.append(f"{h.ip}:{s.port} ({s.version or 'version inconnue'})")
+            elif s.name:
+                neighbors.add(s.name)
+    lines.append("Service visé : " + ("; ".join(targets) if targets else service))
+    if neighbors:
+        lines.append("Autres services sur le(s) hôte(s) : " + ", ".join(sorted(neighbors)))
+    principals = [c.principal for c in world.creds_applicable(service)]
+    lines.append("Credentials disponibles (principals) : "
+                 + (", ".join(principals) if principals else "aucun"))
+    tried: List[str] = []
+    for (h_ip, svc, tech_id, _fp, port), status in world.technique_ledger.items():
+        if svc != service:
+            continue
+        tried.append(f"{tech_id} sur {h_ip}:{port} -> {status} ; résultat : "
+                     + _execute_excerpt(world, tech_id, h_ip))
+    if tried:
+        lines.append("Déjà tenté (NE PAS reproposer) :\n- " + "\n- ".join(tried))
+    else:
+        lines.append("Aucune technique encore tentée pour ce service.")
+    return "\n".join(lines)
+
+
 def node_decide(state: MissionState, config):
     thread_id = config["configurable"]["thread_id"]
     world = get_world(thread_id)
@@ -634,7 +683,7 @@ def node_decide(state: MissionState, config):
             if _already_authored(world, svc):
                 continue
             tech = offense.catalog_author.author_technique(
-                svc, f"Service {svc} découvert, aucune technique applicable au catalogue.",
+                svc, _author_context(world, svc),
                 lambda p: author_llm.invoke(p).content)
             if tech:
                 _MISSION_CATALOG.setdefault(thread_id, []).append(tech)
@@ -960,6 +1009,15 @@ if __name__ == "__main__":
                         print(f"\n[MISSION] Rapport : {report_path}")
                     except Exception as exc:
                         print(f"[MISSION] avertissement: persistance échouée ({type(exc).__name__})")
+                    # Boucle d'apprentissage : promouvoir les techniques rédigées
+                    # par l'auteur LLM dans le RAG (gabarits sans secret). Best-effort.
+                    try:
+                        promoted = offense.catalog_author.promote_techniques_to_rag(
+                            _MISSION_CATALOG.get(mission_id, []), mission_id)
+                        if promoted:
+                            print(f"[MISSION] {promoted} technique(s) LLM promue(s) dans le RAG.")
+                    except Exception as exc:
+                        print(f"[MISSION] avertissement: promotion RAG échouée ({type(exc).__name__})")
             print(f"\nPirateCrew >\n{result.get('final_response', 'Aucune réponse générée.')}")
             # Gate session : remonte les sessions obtenues mais non autorisées.
             _w = _MISSIONS.get(mission_id)

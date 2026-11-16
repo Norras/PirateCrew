@@ -2,6 +2,7 @@
 les garde-fous la valident, puis elle est persistée avec la mission."""
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import asdict
 from pathlib import Path
@@ -18,7 +19,9 @@ def build_author_prompt(service: str, context: str) -> str:
     return (
         f"Propose UNE technique offensive pour le service « {service} », sur une "
         "cible autorisée et dans le périmètre.\n"
-        f"Contexte : {context}\n\n"
+        f"État réel de la mission (tiens-en compte) :\n{context}\n\n"
+        "Ne propose PAS une technique listée comme déjà tentée ci-dessus ; "
+        "appuie-toi sur la version du service et sur les échecs observés.\n"
         "Réponds par exactement UN objet JSON, sans autre texte, avec les clés : "
         "id, name, domain, service, requires, tool, command_template, "
         "success_signal, opens_session.\n"
@@ -76,3 +79,36 @@ def persist_llm_technique(tech: Technique, mission_id: str, root=None) -> Path:
     path.write_text(yaml.safe_dump(entries, allow_unicode=True, sort_keys=False),
                     encoding="utf-8")
     return path
+
+
+def promote_techniques_to_rag(techniques, mission_id: str, store=None) -> int:
+    """Promeut les techniques rédigées par l'auteur LLM dans le RAG partagé.
+
+    N'embarque QUE le gabarit de chaque technique (name/service/tool/
+    command_template/success_signal/requires) — jamais une sortie d'exécution
+    ni un credential : aucune donnée de la cible ne persiste dans le RAG. L'id
+    est un hash du contenu (service + gabarit), donc une même technique rédigée
+    sur deux missions fait un upsert plutôt qu'un doublon. `store=None` →
+    import paresseux du vectorstore partagé. Renvoie le nombre promu.
+    """
+    if not techniques:
+        return 0
+    texts, metadatas, ids = [], [], []
+    for t in techniques:
+        reqs = ", ".join(sorted(t.requires)) if t.requires else "aucun"
+        texts.append(
+            f"Technique « {t.name} » pour le service {t.service} "
+            f"(outil {t.tool or '?'}). Commande : {t.command_template}. "
+            f"Signal de succès : {t.success_signal or '?'}. Prérequis : {reqs}. "
+            f"Ouvre une session : {t.opens_session}. Source : auteur LLM."
+        )
+        metadatas.append({"source": "llm_authored", "service": t.service,
+                          "technique_id": t.id, "tool": t.tool or "",
+                          "mission_id": mission_id})
+        digest = hashlib.sha1(
+            f"{t.service}|{t.command_template}".encode("utf-8")).hexdigest()[:16]
+        ids.append(f"llm:{digest}")
+    if store is None:
+        from agents.pirate_agent import vectorstore as store  # import paresseux
+    store.add_texts(texts, metadatas=metadatas, ids=ids)
+    return len(texts)

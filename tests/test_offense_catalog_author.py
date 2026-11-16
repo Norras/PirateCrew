@@ -40,3 +40,37 @@ def test_author_forces_provided_by_and_service():
                       "command_template": "crackmapexec smb {target}"})
     t = author.author_technique("smb", "ctx", llm_invoke=lambda p: raw)
     assert t is not None and t.provided_by == "llm" and t.service == "smb"
+
+
+def test_build_author_prompt_encadre_le_contexte_et_consigne_les_echecs():
+    p = author.build_author_prompt("smb", "ÉTAT-RÉEL-XYZ")
+    assert "ÉTAT-RÉEL-XYZ" in p            # le contexte réel est injecté
+    assert "déjà" in p.lower()              # consigne : ne pas reproposer ce qui a été tenté
+    assert "UN objet JSON" in p             # format de sortie conservé
+
+
+class _FakeStore:
+    def __init__(self):
+        self.calls = []
+    def add_texts(self, texts, metadatas=None, ids=None):
+        self.calls.append((list(texts), metadatas, ids))
+
+
+def test_promote_techniques_to_rag_add_texts_et_ids_stables():
+    t = author.author_technique("smb", "ctx", llm_invoke=lambda p: _GOOD)
+    s = _FakeStore()
+    assert author.promote_techniques_to_rag([t], "mission-1", store=s) == 1
+    texts, metas, ids = s.calls[0]
+    assert "crackmapexec smb {target}" in texts[0]        # gabarit décrit, placeholders intacts
+    assert metas[0]["source"] == "llm_authored" and metas[0]["service"] == "smb"
+    assert metas[0]["technique_id"] == "llm.smb.cme"
+    # idempotence inter-missions : même contenu -> même id (upsert, pas de doublon)
+    author.promote_techniques_to_rag([t], "mission-2", store=s)
+    assert s.calls[1][2] == ids
+
+
+def test_promote_techniques_to_rag_vide_est_noop():
+    class Boom:
+        def add_texts(self, *a, **k):
+            raise AssertionError("ne doit pas écrire pour une liste vide")
+    assert author.promote_techniques_to_rag([], "m", store=Boom()) == 0
