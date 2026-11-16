@@ -152,3 +152,40 @@ def test_promote_allows_timestamp_in_success_signal():
     t = author.author_technique("smb", "ctx", llm_invoke=lambda p: raw)
     s = _FakeStore()
     assert author.promote_techniques_to_rag([t], "m1", store=s) == 1
+
+
+def test_promote_allows_literal_numeric_port():
+    # un port littéral après -p n'est PAS un credential -> promu (fin du faux positif)
+    raw = json.dumps({"id": "llm.np", "name": "scan", "service": "smb", "tool": "nmap",
+                      "command_template": "nmap -p 445 {target}", "success_signal": "open"})
+    t = author.author_technique("smb", "ctx", llm_invoke=lambda p: raw)
+    s = _FakeStore()
+    assert author.promote_techniques_to_rag([t], "m1", store=s) == 1
+
+
+def test_promote_allows_header_flag():
+    # -H = en-tête HTTP (curl), pas un hash -> promu ; un vrai hash reste capté par l'entropie
+    raw = json.dumps({"id": "llm.hd", "name": "get", "service": "http", "tool": "curl",
+                      "command_template": 'curl -H "Content-Type: application/json" {target}', "success_signal": "200"})
+    t = author.author_technique("http", "ctx", llm_invoke=lambda p: raw)
+    s = _FakeStore()
+    assert author.promote_techniques_to_rag([t], "m1", store=s) == 1
+
+
+def test_promote_skips_short_base64_key_in_noncommand_field():
+    # clé base64 ~22 car. dans success_signal (hors flag/commande) -> captée par entropie (seuil 20)
+    raw = json.dumps({"id": "llm.k", "name": "x", "service": "smb", "tool": "run",
+                      "command_template": "run {target}", "success_signal": "key ABCDEFGHIJKLMNOPQRSTUV"})
+    t = author.author_technique("smb", "ctx", llm_invoke=lambda p: raw)
+    s = _FakeStore()
+    assert author.promote_techniques_to_rag([t], "m1", store=s) == 0
+    assert s.calls == []
+
+
+def test_promote_skips_short_H_hash_via_entropy():
+    # garde : -H retiré du contrôle structurel, mais un vrai hash reste rejeté par l'entropie
+    raw = json.dumps({"id": "llm.hh", "name": "pth", "service": "smb", "tool": "cme",
+                      "command_template": "cme smb {target} -H 31d6cfe0d16ae931b73c59d7e0c089c0", "success_signal": "ok"})
+    t = author.author_technique("smb", "ctx", llm_invoke=lambda p: raw)
+    s = _FakeStore()
+    assert author.promote_techniques_to_rag([t], "m1", store=s) == 0

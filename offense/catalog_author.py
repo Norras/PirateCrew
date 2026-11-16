@@ -88,15 +88,23 @@ _IP_LITERAL = re.compile(
     r"|::[0-9A-Fa-f]{0,4}"                               # IPv6 compressé (::1, fe80::1)
     r"|(?:[0-9A-Fa-f]{1,4}:){4,}[0-9A-Fa-f]{0,4}"        # IPv6 non compressé / MAC (>=4 groupes)
 )
+# La branche `::` sur-rejette un `::` isolé non-IP (ex. PowerShell [Ns]::Methode,
+# pwdump `user:::`) : sur-rejection ASSUMÉE (fail-safe). Resserrer risquerait un
+# faux NÉGATIF sur une vraie IPv6 — un trou, lui. On préfère sur-rejeter.
 
 # Jeton à forte entropie : empreinte/hash/clé/token probable. Volontairement
-# large (fail-closed) : hex >=16, ou base64/alnum >=24.
-_HIGH_ENTROPY = re.compile(r"\b[0-9A-Fa-f]{16,}\b|\b[A-Za-z0-9+/]{24,}={0,2}")
+# large (fail-closed) : hex >=16, ou base64 >=20 (couvre une clé de 16 octets,
+# ~22 car.). On n'inclut PAS `_`/`-` dans la classe base64 : ils joignent des
+# identifiants normaux (ex. NT_STATUS_LOGON_FAILURE) et provoqueraient un
+# sur-masquage / sur-rejet. base64url strict non couvert → résiduel assumé.
+_HIGH_ENTROPY = re.compile(r"\b[0-9A-Fa-f]{16,}\b|[A-Za-z0-9+/]{20,}={0,2}")
 
-# Flags portant une valeur de credential : leur valeur DOIT être un {placeholder},
-# jamais un littéral (sinon le gabarit est spécifique à la mission).
+# Flags portant une valeur de credential : leur valeur DOIT être un {placeholder}
+# (un nombre est toléré : un port n'est pas un secret). Les formes courtes
+# `-p`/`-u` servent aussi de port/URL — `-H` (en-tête ou hash) est EXCLU car un
+# vrai hash est déjà capté par l'entropie, ce qui évite de rejeter `curl -H ...`.
 _CRED_FLAGS = frozenset({"-p", "--password", "--pass", "-passwd", "-pw",
-                         "-H", "-hashes", "--hashes", "--hash",
+                         "-hashes", "--hashes", "--hash",
                          "-u", "--user", "--username"})
 
 
@@ -111,14 +119,17 @@ def _carries_target_data(text: str, forbidden) -> bool:
 
 
 def _flag_value_is_literal(template: str) -> bool:
-    """Vrai si un flag porteur de credential est suivi d'une valeur littérale
-    (pas un {placeholder}) — gabarit spécifique à la mission, non réutilisable."""
+    """Vrai si un flag porteur de credential est suivi d'une valeur LITTÉRALE
+    (ni {placeholder} ni nombre/port) — gabarit spécifique à la mission."""
     try:
         argv = tokenize_argv(template)
     except GuardrailError:
         return True  # non tokenisable → fail-closed
-    return any(argv[i] in _CRED_FLAGS and "{" not in argv[i + 1]
-               for i in range(len(argv) - 1))
+    for i in range(len(argv) - 1):
+        val = argv[i + 1]
+        if argv[i] in _CRED_FLAGS and "{" not in val and not val.isdigit():
+            return True
+    return False
 
 
 def promote_techniques_to_rag(techniques, mission_id: str, forbidden=(), store=None) -> int:
