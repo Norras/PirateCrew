@@ -2,6 +2,7 @@ import os
 import re
 import shutil
 import socket
+import offense.executor
 from typing import TypedDict, List, Dict, Any, Literal
 from dotenv import load_dotenv
 from langchain_anthropic import ChatAnthropic
@@ -9,7 +10,7 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
 
 from scope import load_scope, set_active_scope, ScopeError
-from state.world_model import WorldModel, Credential, inputs_fingerprint
+from state.world_model import WorldModel, Credential, Session, inputs_fingerprint
 from state import mission_io
 from catalog import load_catalog, techniques_for, technique_by_id
 
@@ -33,6 +34,11 @@ def set_verbose(on: bool) -> None:
 def is_verbose() -> bool:
     """État courant du mode verbose."""
     return _VERBOSE
+
+
+def is_propose_only() -> bool:
+    """Mode « propose-only » : stub (toujours False) ; remplacé par le vrai drapeau (Task 7)."""
+    return False
 
 
 def _vprint(msg: str) -> None:
@@ -576,6 +582,29 @@ def node_execute(state: MissionState, config):
                             "service": task["service"], "port": port, "inputs_fp": inputs_fp,
                             "status": "blocked_missing_tool", "tool": tech.tool, "detail": msg})
             continue
+        # Chemin offensif DÉTERMINISTE (operator/llm) : rendu + exécuteur gardé,
+        # jamais via l'agent LLM. Les techniques builtin gardent le chemin agent.
+        if tech.provided_by in ("operator", "llm"):
+            if is_propose_only() and tech.provided_by == "llm":
+                reports.append({"technique": tech.id, "host": task["host"],
+                                "service": task["service"], "port": port, "inputs_fp": inputs_fp,
+                                "status": "proposed_awaiting_operator",
+                                "detail": "Technique LLM proposée, en attente de validation opérateur."})
+                continue
+            creds = world.creds_applicable(task["service"])
+            rendered = _render_template(tech.command_template, task["host"], port, creds=creds)
+            status, raw = offense.executor.execute_command(rendered, timeout=120)
+            world.add_evidence({"phase": "execute", "technique": tech.id, "host": task["host"],
+                                "raw": raw, "rendered": rendered})
+            if status == "done":
+                reconcile_evidence(world, raw)
+                if tech.opens_session and tech.success_signal and tech.success_signal in raw:
+                    world.add_session(Session(host=task["host"], channel=(tech.tool or tech.id),
+                                              via_cred=(creds[0].principal if creds else None),
+                                              authorized=False))
+            reports.append({"technique": tech.id, "host": task["host"], "service": task["service"],
+                            "port": port, "inputs_fp": inputs_fp, "status": status, "detail": raw})
+            continue
         from agents.dynamic_agent import build_task_agent
         domain = SERVICE_DOMAIN.get(task["service"], tech.domain or "network")
         creds = world.creds_applicable(task["service"])
@@ -608,11 +637,13 @@ def node_integrate(state: MissionState, config):
     thread_id = config["configurable"]["thread_id"]
     world = get_world(thread_id)
     reports = state.get("execution_reports", [])
-    # Ne marque « tentée » que ce qui a RÉELLEMENT tourné (done/error). Une
+    # Ne marque « tentée » que ce qui a tourné (done/error) ou été bloqué par un garde-fou
+    # (évite le re-spin). Une
     # technique bloquée par un outil manquant n'est pas grillée : elle reste
     # replanifiable après installation + relance (Option Y). Clé par (entrées, port).
     for report in reports:
-        if report.get("status") in ("done", "error"):
+        if report.get("status") in ("done", "error", "blocked_destructive",
+                                    "blocked_out_of_scope", "blocked_shell_meta"):
             world.mark_technique(report["host"], report["service"], report["technique"],
                                  report.get("inputs_fp", ""), status="tried",
                                  port=int(report.get("port", 0) or 0))

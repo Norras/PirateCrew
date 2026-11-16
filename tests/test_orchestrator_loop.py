@@ -344,3 +344,29 @@ def test_authorize_sessions_counts_only_unauthorized_alive():
     wm.add_session(Session(host="127.0.0.1", channel="ssh", authorized=True))
     wm.add_session(Session(host="127.0.0.1", channel="x", alive=False))
     assert orch.authorize_sessions(wm, "127.0.0.1") == 0
+
+
+def test_node_execute_runs_offensive_technique_deterministically(monkeypatch, tmp_path):
+    import orchestrator as orch
+    from state import mission_io
+    from catalog.loader import Technique
+    monkeypatch.setattr(mission_io, "MISSIONS_ROOT", tmp_path)
+    # agent = bombe : s'il est appelé sur une technique offensive, le test échoue
+    def _boom(*a, **k): raise AssertionError("agent ne doit pas exécuter une technique offensive")
+    monkeypatch.setattr("agents.dynamic_agent.build_task_agent", _boom)
+    tech = Technique(id="llm.win", name="n", domain="ad", service="smb", requires=set(),
+                     tool="crackmapexec", command_template="crackmapexec smb {target} -u {user} -H {hash}",
+                     success_signal="Pwn3d", provided_by="llm", opens_session=True)
+    monkeypatch.setattr(orch, "_CATALOG", [tech])
+    monkeypatch.setattr(orch, "technique_available", lambda t: True)
+    monkeypatch.setattr("offense.executor.execute_command",
+                        lambda rendered, **kw: ("done", "STATUS ... (Pwn3d!) ..."))
+    wm = WorldModel(scope=Scope.from_lines(["127.0.0.1/32"]))
+    wm.add_service("127.0.0.1", 445, name="smb")
+    wm.add_credential(Credential(kind="hash", principal="admin", secret="h", source="t"))
+    orch._MISSIONS["t_off"] = wm
+    cfg = {"configurable": {"thread_id": "t_off"}}
+    planned = plan_tasks(wm, orch._CATALOG)
+    reports = orch.node_execute({"planned": planned, "rag_context": ""}, cfg)["execution_reports"]
+    assert any(r["status"] == "done" and r["technique"] == "llm.win" for r in reports)
+    assert any(s.host == "127.0.0.1" and s.authorized is False for s in wm.sessions)

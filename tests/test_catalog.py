@@ -17,3 +17,10 @@ def test_requires_parsed_as_set():
 def test_missing_operator_dir_is_ok(tmp_path):
     cat = load_catalog(builtin_dir="catalog/builtin", operator_dir=str(tmp_path / "absent"))
     assert cat  # builtin seuls, pas de crash
+
+
+def test_technique_reads_opens_session_flag():
+    from catalog.loader import _technique_from_dict
+    t = _technique_from_dict({"id": "x", "service": "smb", "opens_session": True})
+    assert t.opens_session is True
+    assert _technique_from_dict({"id": "y", "service": "smb"}).opens_session is False
