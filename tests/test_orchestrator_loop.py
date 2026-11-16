@@ -56,6 +56,19 @@ def test_author_context_tronque_les_sorties_longues():
     assert "X" * 200 in ctx and "X" * 400 not in ctx
 
 
+def test_author_context_redacts_known_secret():
+    from orchestrator import _author_context
+    w = WorldModel(scope=Scope.from_lines(["10.0.0.0/24"]))
+    w.add_service("10.0.0.5", 445, name="smb")
+    w.add_credential(Credential(kind="password", principal="admin", secret="Summer2024!"))
+    w.mark_technique("10.0.0.5", "smb", "smb-brute", status="tried", port=445)
+    w.add_evidence({"phase": "execute", "technique": "smb-brute", "host": "10.0.0.5",
+                    "raw": "admin:Summer2024! (valid session)"})
+    ctx = _author_context(w, "smb")
+    assert "Summer2024!" not in ctx   # secret connu expurgé de l'extrait envoyé au LLM
+    assert "***" in ctx               # marqueur de rédaction présent
+
+
 def test_integrate_captures_raw_evidence():
     wm = WorldModel(scope=Scope.from_lines(["10.10.10.0/24"]))
     n = reconcile_evidence(wm, "Found creds admin:Password1 on 10.10.10.5")

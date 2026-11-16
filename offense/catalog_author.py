@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import asdict
 from pathlib import Path
 
@@ -25,8 +26,9 @@ def build_author_prompt(service: str, context: str) -> str:
         "Réponds par exactement UN objet JSON, sans autre texte, avec les clés : "
         "id, name, domain, service, requires, tool, command_template, "
         "success_signal, opens_session.\n"
-        "command_template peut utiliser les placeholders {target} {user} {hash} "
-        "{domain} {share}.\n"
+        "command_template DOIT utiliser les placeholders {target} {user} {hash} "
+        "{domain} {share} et JAMAIS de valeur littérale (IP, identifiant, mot de "
+        "passe) : une technique à valeurs littérales n'est pas réutilisable.\n"
         "INTERDIT : métacaractères shell (; | & > < ` $) et toute action "
         "destructive (suppression, formatage, arrêt, déni de service)."
     )
@@ -81,20 +83,41 @@ def persist_llm_technique(tech: Technique, mission_id: str, root=None) -> Path:
     return path
 
 
-def promote_techniques_to_rag(techniques, mission_id: str, store=None) -> int:
+_IP_LITERAL = re.compile(
+    r"\b\d{1,3}(?:\.\d{1,3}){3}\b"                   # IPv4
+    r"|(?:[0-9A-Fa-f]{1,4}:){2,}[0-9A-Fa-f]{0,4}"    # IPv6-ish (>=2 groupes, volontairement large)
+)
+
+
+def _carries_target_data(text: str, forbidden) -> bool:
+    """Vrai si `text` porte un littéral de cible : une IP, ou l'une des chaînes
+    interdites (secrets/principals de la mission). Fail-closed : en cas de doute
+    on renvoie True (la technique ne sera pas persistée dans le RAG partagé)."""
+    if _IP_LITERAL.search(text):
+        return True
+    return any(bad and len(bad) >= 3 and bad in text for bad in forbidden)
+
+
+def promote_techniques_to_rag(techniques, mission_id: str, forbidden=(), store=None) -> int:
     """Promeut les techniques rédigées par l'auteur LLM dans le RAG partagé.
 
-    N'embarque QUE le gabarit de chaque technique (name/service/tool/
-    command_template/success_signal/requires) — jamais une sortie d'exécution
-    ni un credential : aucune donnée de la cible ne persiste dans le RAG. L'id
-    est un hash du contenu (service + gabarit), donc une même technique rédigée
-    sur deux missions fait un upsert plutôt qu'un doublon. `store=None` →
-    import paresseux du vectorstore partagé. Renvoie le nombre promu.
+    Fail-closed : une technique dont un champ persisté (id/name/command_template/
+    success_signal) porte un littéral de cible — une IP, ou un secret/principal
+    de la mission listé dans `forbidden` — n'est PAS persistée : elle est
+    spécifique à la mission, pas une connaissance réutilisable. Ainsi aucune
+    donnée de la cible n'entre dans le store partagé (ni sortie d'exécution, ni
+    credential, ni IP). `mission_id` est accepté mais volontairement ABSENT de
+    la metadata (il contient l'IP cible). Id stable = hash(service|gabarit) →
+    upsert idempotent. `store=None` → import paresseux du vectorstore. Renvoie
+    le nombre promu.
     """
     if not techniques:
         return 0
     texts, metadatas, ids = [], [], []
     for t in techniques:
+        blob = " ".join(str(x or "") for x in (t.id, t.name, t.command_template, t.success_signal))
+        if _carries_target_data(blob, forbidden):
+            continue  # spécifique à la mission → jamais dans le RAG partagé
         reqs = ", ".join(sorted(t.requires)) if t.requires else "aucun"
         texts.append(
             f"Technique « {t.name} » pour le service {t.service} "
@@ -103,11 +126,12 @@ def promote_techniques_to_rag(techniques, mission_id: str, store=None) -> int:
             f"Ouvre une session : {t.opens_session}. Source : auteur LLM."
         )
         metadatas.append({"source": "llm_authored", "service": t.service,
-                          "technique_id": t.id, "tool": t.tool or "",
-                          "mission_id": mission_id})
+                          "technique_id": t.id, "tool": t.tool or ""})
         digest = hashlib.sha1(
             f"{t.service}|{t.command_template}".encode("utf-8")).hexdigest()[:16]
         ids.append(f"llm:{digest}")
+    if not texts:
+        return 0
     if store is None:
         from agents.pirate_agent import vectorstore as store  # import paresseux
     store.add_texts(texts, metadatas=metadatas, ids=ids)

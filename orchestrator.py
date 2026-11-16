@@ -624,8 +624,18 @@ def _already_authored(world: WorldModel, service: str) -> bool:
                for e in world.evidence)
 
 
-def _execute_excerpt(world: WorldModel, tech_id: str, host: str, limit: int = 200) -> str:
-    """Extrait tronqué de la dernière sortie d'exécution pour (tech_id, host)."""
+def _redact(text: str, secrets) -> str:
+    """Masque (***) les secrets connus avant que le texte n'aille au LLM."""
+    for s in secrets:
+        if s and len(s) >= 3:
+            text = text.replace(s, "***")
+    return text
+
+
+def _execute_excerpt(world: WorldModel, tech_id: str, host: str,
+                     secrets=(), limit: int = 200) -> str:
+    """Extrait de la dernière sortie d'exécution pour (tech_id, host), expurgé
+    des secrets connus PUIS tronqué (l'ordre évite tout secret coupé en deux)."""
     raw = ""
     for e in world.evidence:
         if (e.get("phase") == "execute" and e.get("technique") == tech_id
@@ -633,7 +643,8 @@ def _execute_excerpt(world: WorldModel, tech_id: str, host: str, limit: int = 20
             raw = e.get("raw", "") or ""
     if not raw:
         return "(pas de sortie capturée)"
-    return str(raw).replace("\n", " ").replace("\r", " ")[:limit]
+    cleaned = _redact(str(raw).replace("\n", " ").replace("\r", " "), secrets)
+    return cleaned[:limit]
 
 
 def _author_context(world: WorldModel, service: str) -> str:
@@ -642,9 +653,11 @@ def _author_context(world: WorldModel, service: str) -> str:
     Assemble depuis le WorldModel : version(s)/port(s) du service visé sur les
     hôtes in-scope, services voisins, principals des credentials applicables, et
     les techniques déjà tentées pour ce service avec un extrait tronqué de leur
-    résultat. Jamais de secret en clair (principals uniquement) — ce texte part
+    résultat. Les extraits de sortie sont EXPURGÉS des secrets connus (masqués
+    par ***) ; seuls les principals des credentials sont cités — ce texte part
     au LLM, comme le contexte du chemin agent existant.
     """
+    secrets = [c.secret for c in world.credentials if c.secret]
     lines: List[str] = []
     targets: List[str] = []
     neighbors = set()
@@ -665,7 +678,7 @@ def _author_context(world: WorldModel, service: str) -> str:
         if svc != service:
             continue
         tried.append(f"{tech_id} sur {h_ip}:{port} -> {status} ; résultat : "
-                     + _execute_excerpt(world, tech_id, h_ip))
+                     + _execute_excerpt(world, tech_id, h_ip, secrets))
     if tried:
         lines.append("Déjà tenté (NE PAS reproposer) :\n- " + "\n- ".join(tried))
     else:
@@ -1012,8 +1025,11 @@ if __name__ == "__main__":
                     # Boucle d'apprentissage : promouvoir les techniques rédigées
                     # par l'auteur LLM dans le RAG (gabarits sans secret). Best-effort.
                     try:
+                        _creds = w.credentials
+                        _forbidden = ([c.secret for c in _creds if c.secret]
+                                      + [c.principal for c in _creds if c.principal])
                         promoted = offense.catalog_author.promote_techniques_to_rag(
-                            _MISSION_CATALOG.get(mission_id, []), mission_id)
+                            _MISSION_CATALOG.get(mission_id, []), mission_id, forbidden=_forbidden)
                         if promoted:
                             print(f"[MISSION] {promoted} technique(s) LLM promue(s) dans le RAG.")
                     except Exception as exc:

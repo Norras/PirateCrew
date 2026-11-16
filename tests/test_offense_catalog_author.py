@@ -74,3 +74,32 @@ def test_promote_techniques_to_rag_vide_est_noop():
         def add_texts(self, *a, **k):
             raise AssertionError("ne doit pas écrire pour une liste vide")
     assert author.promote_techniques_to_rag([], "m", store=Boom()) == 0
+
+
+def test_promote_skips_template_with_ip_literal():
+    raw = json.dumps({"id": "llm.smb.x", "name": "x", "service": "smb", "tool": "crackmapexec",
+                      "command_template": "crackmapexec smb 10.0.0.5 -u admin", "success_signal": "Pwn3d"})
+    t = author.author_technique("smb", "ctx", llm_invoke=lambda p: raw)
+    s = _FakeStore()
+    # gabarit à IP littérale = spécifique à la mission -> jamais dans le RAG partagé
+    assert author.promote_techniques_to_rag([t], "m1", store=s) == 0
+    assert s.calls == []
+
+
+def test_promote_skips_template_with_known_secret():
+    raw = json.dumps({"id": "llm.smb.y", "name": "y", "service": "smb", "tool": "crackmapexec",
+                      "command_template": "crackmapexec smb {target} -u admin -p Summer2024!",
+                      "success_signal": "ok"})
+    t = author.author_technique("smb", "ctx", llm_invoke=lambda p: raw)
+    s = _FakeStore()
+    assert author.promote_techniques_to_rag([t], "m1", forbidden=["Summer2024!"], store=s) == 0
+    assert s.calls == []
+
+
+def test_promote_metadata_omits_target_mission_id():
+    t = author.author_technique("smb", "ctx", llm_invoke=lambda p: _GOOD)
+    s = _FakeStore()
+    author.promote_techniques_to_rag([t], "10.0.0.5-20261116-120000", store=s)
+    meta = s.calls[0][1][0]
+    assert "mission_id" not in meta            # champ retiré
+    assert "10.0.0.5" not in str(meta)         # aucune IP cible en metadata
