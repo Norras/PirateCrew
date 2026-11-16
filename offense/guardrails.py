@@ -68,9 +68,16 @@ def destructive_match(rendered: str) -> str | None:
 def scope_violations(rendered: str) -> list[str]:
     """Littéraux IPv4/IPv6 hors périmètre (dédoublonnés, ordre conservé).
 
-    Limite acceptée (plan) : les noms d'hôte nus ne sont volontairement PAS
-    scannés ici ; les cibles par nom sont contrôlées aux sites d'appel des
-    outils curés via `assert_in_scope`.
+    Choix délibéré (pas une simple limite du plan) : les noms d'hôte ne sont
+    PAS résolus ici. Le faire imposerait une résolution DNS synchrone sur le
+    chemin d'exécution autonome — latence voire blocage sur un résolveur de lab
+    lent/absent, plus une fuite de requêtes (OPSEC) — et provoquerait des faux
+    positifs bloquant des commandes légitimes où un nom hors périmètre n'est
+    qu'une donnée (email, URL, fichier type `x.zip`). L'application par IP
+    ci-dessus reste étanche ; les cibles désignées par nom sont résolues puis
+    contrôlées aux sites d'appel des outils curés via `assert_in_scope`, et
+    l'auteur LLM est contraint d'émettre `{target}` (une IP in-scope). Backstop
+    connu et assumé, pas un trou fail-open.
     """
     out: list[str] = []
     for ip in _IPV4.findall(rendered):
