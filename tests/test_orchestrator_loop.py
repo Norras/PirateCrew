@@ -18,6 +18,14 @@ def test_plan_tasks_filters_by_requires_and_ledger():
                for t in tasks)
 
 
+def test_author_model_configurable_par_env(monkeypatch):
+    import orchestrator as o
+    monkeypatch.delenv("PIRATECREW_AUTHOR_MODEL", raising=False)
+    assert o._author_model_name() == "claude-sonnet-4-6"
+    monkeypatch.setenv("PIRATECREW_AUTHOR_MODEL", "claude-opus-4-8")
+    assert o._author_model_name() == "claude-opus-4-8"
+
+
 def test_route_finishes_on_cycle_cap():
     assert route_after_integrate({"cycle": 6, "max_cycles": 6}) == "finish"
 

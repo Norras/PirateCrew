@@ -142,6 +142,22 @@ class MissionState(TypedDict, total=False):
 
 llm = ChatAnthropic(model="claude-sonnet-4-6")
 
+
+def _author_model_name() -> str:
+    """Modèle de l'auteur de techniques LLM, configurable par l'env
+    `PIRATECREW_AUTHOR_MODEL` (défaut : le modèle partagé de l'orchestrateur).
+
+    Permet de piloter l'auteur indépendamment du routeur/décideur (`llm`
+    ci-dessus) — p. ex. un modèle plus capable pour écrire des techniques —
+    sans toucher au reste de l'orchestrateur.
+    """
+    return os.getenv("PIRATECREW_AUTHOR_MODEL", "claude-sonnet-4-6")
+
+
+# Instance dédiée à l'auteur : lit l'env à l'import (le REPL/CLI fixe l'env
+# avant lancement). Par défaut, même modèle que `llm`.
+author_llm = ChatAnthropic(model=_author_model_name())
+
 # Détection des services à partir de la sortie (texte libre) d'un agent de recon.
 KNOWN_SERVICES = ["https", "http", "smb", "netbios", "ldap", "ftp", "ssh",
                   "rdp", "mysql", "smtp", "dns", "winrm"]
@@ -619,7 +635,7 @@ def node_decide(state: MissionState, config):
                 continue
             tech = offense.catalog_author.author_technique(
                 svc, f"Service {svc} découvert, aucune technique applicable au catalogue.",
-                lambda p: llm.invoke(p).content)
+                lambda p: author_llm.invoke(p).content)
             if tech:
                 _MISSION_CATALOG.setdefault(thread_id, []).append(tech)
                 try:
