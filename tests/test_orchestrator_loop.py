@@ -370,3 +370,35 @@ def test_node_execute_runs_offensive_technique_deterministically(monkeypatch, tm
     reports = orch.node_execute({"planned": planned, "rag_context": ""}, cfg)["execution_reports"]
     assert any(r["status"] == "done" and r["technique"] == "llm.win" for r in reports)
     assert any(s.host == "127.0.0.1" and s.authorized is False for s in wm.sessions)
+
+
+def test_propose_only_skips_llm_execution(monkeypatch, tmp_path):
+    import orchestrator as orch
+    from state import mission_io
+    from catalog.loader import Technique
+    monkeypatch.setattr(mission_io, "MISSIONS_ROOT", tmp_path)
+    monkeypatch.setattr("offense.executor.execute_command",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("ne doit pas exécuter")))
+    tech = Technique(id="llm.x", name="n", domain="ad", service="smb", requires=set(),
+                     tool="cme", command_template="cme smb {target}", success_signal="ok",
+                     provided_by="llm")
+    monkeypatch.setattr(orch, "_CATALOG", [tech])
+    monkeypatch.setattr(orch, "technique_available", lambda t: True)
+    orch.set_propose_only(True)
+    try:
+        wm = WorldModel(scope=Scope.from_lines(["127.0.0.1/32"]))
+        wm.add_service("127.0.0.1", 445, name="smb"); orch._MISSIONS["t_po"] = wm
+        cfg = {"configurable": {"thread_id": "t_po"}}
+        reports = orch.node_execute({"planned": plan_tasks(wm, orch._CATALOG), "rag_context": ""}, cfg)["execution_reports"]
+        assert any(r["status"] == "proposed_awaiting_operator" for r in reports)
+    finally:
+        orch.set_propose_only(False)
+
+
+def test_dry_services_detects_service_without_technique():
+    import orchestrator as orch
+    wm = WorldModel(scope=Scope.from_lines(["127.0.0.1/32"]))
+    wm.add_service("127.0.0.1", 9999, name="exotic")   # aucun builtin pour "exotic"
+    assert "exotic" in orch._dry_services(wm, orch._CATALOG, planned=[])
+    wm.add_service("127.0.0.1", 445, name="smb")        # smb a des builtins
+    assert "smb" not in orch._dry_services(wm, orch._CATALOG, planned=plan_tasks(wm, orch._CATALOG))

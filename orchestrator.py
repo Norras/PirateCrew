@@ -3,6 +3,7 @@ import re
 import shutil
 import socket
 import offense.executor
+import offense.catalog_author
 from typing import TypedDict, List, Dict, Any, Literal
 from dotenv import load_dotenv
 from langchain_anthropic import ChatAnthropic
@@ -36,9 +37,21 @@ def is_verbose() -> bool:
     return _VERBOSE
 
 
+# --- Mode propose-only ------------------------------------------------------ #
+# Activable par PIRATECREW_PROPOSE_ONLY (1/true/on/oui) : les techniques
+# rédigées par le LLM sont proposées/persistées mais JAMAIS exécutées.
+_PROPOSE_ONLY = os.getenv("PIRATECREW_PROPOSE_ONLY", "").strip().lower() in ("1", "true", "yes", "on", "oui")
+
+
+def set_propose_only(on: bool) -> None:
+    """Active/désactive le mode propose-only du processus."""
+    global _PROPOSE_ONLY
+    _PROPOSE_ONLY = bool(on)
+
+
 def is_propose_only() -> bool:
-    """Mode « propose-only » : stub (toujours False) ; remplacé par le vrai drapeau (Task 7)."""
-    return False
+    """État courant du mode propose-only."""
+    return _PROPOSE_ONLY
 
 
 def _vprint(msg: str) -> None:
@@ -543,10 +556,52 @@ def node_recon(state: MissionState, config):
             "max_cycles": state.get("max_cycles", 6)}
 
 
+def _dry_services(world: WorldModel, catalog, planned) -> List[str]:
+    """Services in-scope « à sec » à confier à l'auteur LLM : nom non vide, absents
+    des tâches planifiées, et sans technique OU dont toutes les techniques sont
+    déjà tentées (vrai trou de catalogue, pas une attente de prérequis)."""
+    planned_services = {t.get("service") for t in planned}
+    out: List[str] = []
+    for h in world.in_scope_hosts():
+        for svc in h.services:
+            name = svc.name
+            if not name or name in planned_services or name in out:
+                continue
+            techs = techniques_for(catalog, name)
+            if all(any(k[0] == h.ip and k[1] == name and k[2] == t.id and k[4] == svc.port
+                       for k in world.technique_ledger) for t in techs):
+                out.append(name)
+    return out
+
+
+def _already_authored(world: WorldModel, service: str) -> bool:
+    """Vrai si l'auteur LLM a déjà rédigé une technique pour ce service (une fois par mission)."""
+    return any(e.get("kind") == "llm_technique" and e.get("service") == service
+               for e in world.evidence)
+
+
 def node_decide(state: MissionState, config):
     thread_id = config["configurable"]["thread_id"]
     world = get_world(thread_id)
     tasks = plan_tasks(world, _CATALOG)
+    if not tasks:
+        authored = False
+        for svc in _dry_services(world, _CATALOG, tasks):
+            if _already_authored(world, svc):
+                continue
+            tech = offense.catalog_author.author_technique(
+                svc, f"Service {svc} découvert, aucune technique applicable au catalogue.",
+                lambda p: llm.invoke(p).content)
+            if tech:
+                _CATALOG.append(tech)
+                try:
+                    offense.catalog_author.persist_llm_technique(tech, thread_id)
+                except Exception as exc:  # noqa: BLE001 - best-effort
+                    _vprint(f"Persistance technique LLM échouée : {type(exc).__name__}")
+                world.add_evidence({"kind": "llm_technique", "service": svc, "id": tech.id})
+                authored = True
+        if authored:
+            tasks = plan_tasks(world, _CATALOG)
     _vprint("Tâches planifiées : " + str(
         [f"{t['host']}:{t['port']}/{t['service']}→{t['technique_id']}" for t in tasks] or "aucune"))
     services = state.get("discovered_services", [])
