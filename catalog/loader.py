@@ -38,7 +38,8 @@ def _technique_from_dict(entry: dict) -> Technique:
         name=entry.get("name", entry["id"]),
         domain=entry.get("domain", ""),
         service=entry.get("service", ""),
-        requires=set(entry.get("requires") or []),
+        requires=set([entry["requires"]] if isinstance(entry.get("requires"), str)
+                     else (entry.get("requires") or [])),
         tool=entry.get("tool", ""),
         command_template=entry.get("command_template", ""),
         success_signal=entry.get("success_signal", ""),

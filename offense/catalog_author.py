@@ -31,6 +31,8 @@ def build_author_prompt(service: str, context: str) -> str:
 
 def parse_technique(raw: str) -> dict | None:
     """Premier objet JSON complet de `raw` (prose/fences tolérées), sinon None."""
+    if not isinstance(raw, str):
+        return None
     try:
         obj, _ = json.JSONDecoder().raw_decode(raw[raw.index("{"):])
     except (ValueError, TypeError):

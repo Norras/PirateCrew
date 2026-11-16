@@ -36,6 +36,13 @@ DENYLIST: list[tuple[re.Pattern, str]] = [
         (r"\bTRUNCATE\b", "TRUNCATE"),
         (r"of=/dev/", "écriture périphérique bloc (of=/dev/)"),
         (r">\s*/dev/sd", "écriture périphérique bloc (>/dev/sd)"),
+        (r"/dev/(sd|nvme|vd|hd|mapper|disk|loop)", "périphérique bloc (/dev/…)"),
+        (r"\bshred\b", "shred"),
+        (r"\bwipefs\b", "wipefs"),
+        (r"\bmkswap\b", "mkswap"),
+        (r"\bsgdisk\b", "sgdisk"),
+        (r"\bparted\b", "parted"),
+        (r"\bbadblocks\b.*-w", "badblocks -w"),
     ]
 ]
 
@@ -59,7 +66,12 @@ def destructive_match(rendered: str) -> str | None:
 
 
 def scope_violations(rendered: str) -> list[str]:
-    """Littéraux IPv4 hors périmètre (dédoublonnés, ordre conservé)."""
+    """Littéraux IPv4/IPv6 hors périmètre (dédoublonnés, ordre conservé).
+
+    Limite acceptée (plan) : les noms d'hôte nus ne sont volontairement PAS
+    scannés ici ; les cibles par nom sont contrôlées aux sites d'appel des
+    outils curés via `assert_in_scope`.
+    """
     out: list[str] = []
     for ip in _IPV4.findall(rendered):
         if ip in out:
@@ -73,6 +85,19 @@ def scope_violations(rendered: str) -> list[str]:
             assert_in_scope(ip)
         except ScopeError:
             out.append(ip)
+    for tok in rendered.split():
+        tok = tok.strip("[]").lstrip("/\\")
+        tok = tok.split("/", 1)[0].strip("[]")
+        try:
+            addr = ipaddress.ip_address(tok)
+        except ValueError:
+            continue
+        if addr.version != 6 or tok in out:
+            continue
+        try:
+            assert_in_scope(tok)
+        except ScopeError:
+            out.append(tok)
     return out
 
 

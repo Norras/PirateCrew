@@ -28,3 +28,15 @@ def test_persist_roundtrips_through_loader(tmp_path):
     assert pathlib.Path(p).exists()
     cat = load_catalog(builtin_dir=str(tmp_path / "m1"), operator_dir="catalog/__none__")
     assert any(x.id == "llm.smb.cme" and x.provided_by == "llm" for x in cat)
+
+
+def test_parse_technique_non_str_returns_none():
+    assert author.parse_technique(None) is None
+
+
+def test_author_forces_provided_by_and_service():
+    raw = json.dumps({"id": "llm.x", "service": "ftp", "provided_by": "builtin",
+                      "tool": "crackmapexec",
+                      "command_template": "crackmapexec smb {target}"})
+    t = author.author_technique("smb", "ctx", llm_invoke=lambda p: raw)
+    assert t is not None and t.provided_by == "llm" and t.service == "smb"

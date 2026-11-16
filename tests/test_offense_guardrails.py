@@ -56,3 +56,33 @@ def test_tokenize_unbalanced_quote():
     import pytest
     with pytest.raises(g.GuardrailError):
         g.tokenize_argv('foo "bar')
+
+
+_BLOCK_DEV = ["cp /dev/zero /dev/sda", "shred -n 3 /dev/sda", "wipefs -a /dev/sda",
+              "mkswap /dev/sda", "sgdisk --zap-all /dev/sda", "parted /dev/sda mklabel gpt",
+              "badblocks -w /dev/sda"]
+
+
+def test_block_device_wipes_denied():
+    for bad in _BLOCK_DEV:
+        assert g.destructive_match(bad), bad
+        assert g.evaluate(bad)[0] == "blocked_destructive", bad
+
+
+def test_dev_null_not_matched_by_device_pattern():
+    assert g.destructive_match("cat /dev/null") is None
+    assert g.destructive_match("cat /dev/urandom") is None
+    assert g.destructive_match("badblocks /dev/null") is None
+
+
+def test_scope_violations_flags_ipv6_literal():
+    set_active_scope(Scope.from_lines(["127.0.0.1/32"]))
+    assert g.scope_violations("evil-winrm -i dead:beef::1") == ["dead:beef::1"]
+    assert g.scope_violations("evil-winrm -i [dead:beef::1]") == ["dead:beef::1"]
+    assert g.scope_violations("x 127.0.0.1") == []
+
+
+def test_destructive_binaries_without_device():
+    for bad in ["shred secret.txt", "wipefs x", "mkswap x", "sgdisk x", "parted x", "badblocks -w x"]:
+        assert g.destructive_match(bad), bad
+    assert g.destructive_match("badblocks x") is None

@@ -27,7 +27,10 @@ def execute_command(rendered: str, *, timeout: int = 120, runner=None) -> tuple[
     if not (rendered or "").strip():
         return ("error", "(aucune commande)")
 
-    verdict = evaluate(rendered)
+    try:
+        verdict = evaluate(rendered)
+    except Exception as e:  # défense en profondeur : ne jamais lever
+        return ("error", f"garde-fou: {type(e).__name__}")
     if verdict is not None:
         _audit_block(*verdict)
         return verdict

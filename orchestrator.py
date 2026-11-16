@@ -62,6 +62,14 @@ def _vprint(msg: str) -> None:
 
 # Catalogue chargé une fois (lecture YAML légère, builtin + operator).
 _CATALOG = load_catalog()
+# Surcouche par mission (clé thread_id) : techniques auteurées par le LLM, isolées
+# entre missions d'un même processus (le REPL en enchaîne plusieurs).
+_MISSION_CATALOG: Dict[str, list] = {}
+
+
+def _effective_catalog(thread_id: str) -> list:
+    """Catalogue de base + techniques LLM propres à cette mission."""
+    return _CATALOG + _MISSION_CATALOG.get(thread_id, [])
 
 # --- REGISTRE DE MISSION ---------------------------------------------------- #
 # Le WorldModel est tenu PAR RÉFÉRENCE ici, indexé par thread_id, et PAS
@@ -603,17 +611,17 @@ def _already_authored(world: WorldModel, service: str) -> bool:
 def node_decide(state: MissionState, config):
     thread_id = config["configurable"]["thread_id"]
     world = get_world(thread_id)
-    tasks = plan_tasks(world, _CATALOG)
+    tasks = plan_tasks(world, _effective_catalog(thread_id))
     if not tasks:
         authored = False
-        for svc in _dry_services(world, _CATALOG, tasks):
+        for svc in _dry_services(world, _effective_catalog(thread_id), tasks):
             if _already_authored(world, svc):
                 continue
             tech = offense.catalog_author.author_technique(
                 svc, f"Service {svc} découvert, aucune technique applicable au catalogue.",
                 lambda p: llm.invoke(p).content)
             if tech:
-                _CATALOG.append(tech)
+                _MISSION_CATALOG.setdefault(thread_id, []).append(tech)
                 try:
                     offense.catalog_author.persist_llm_technique(tech, thread_id)
                 except Exception as exc:  # noqa: BLE001 - best-effort
@@ -621,7 +629,7 @@ def node_decide(state: MissionState, config):
                 world.add_evidence({"kind": "llm_technique", "service": svc, "id": tech.id})
                 authored = True
         if authored:
-            tasks = plan_tasks(world, _CATALOG)
+            tasks = plan_tasks(world, _effective_catalog(thread_id))
     _vprint("Tâches planifiées : " + str(
         [f"{t['host']}:{t['port']}/{t['service']}→{t['technique_id']}" for t in tasks] or "aucune"))
     services = state.get("discovered_services", [])
@@ -643,7 +651,7 @@ def node_execute(state: MissionState, config):
     world = get_world(thread_id)
     reports: List[Dict[str, Any]] = []
     for task in state.get("planned", []):
-        tech = technique_by_id(_CATALOG, task["technique_id"])
+        tech = technique_by_id(_effective_catalog(thread_id), task["technique_id"])
         port = int(task.get("port", 0) or 0)
         inputs_fp = task.get("inputs_fp", "")
         # Escalade « outil manquant » (Option Y) : outil requis absent ⇒ on
@@ -760,8 +768,9 @@ def route_after_integrate(state: MissionState) -> Literal["continue", "finish"]:
         # On ne continue QUE s'il reste une tâche réellement EXÉCUTABLE. Les tâches
         # bloquées par un outil absent sont signalées mais ne font pas tourner la
         # boucle à vide jusqu'au cap de cycles (cf. escalade Option Y).
-        runnable = [t for t in plan_tasks(world, _CATALOG)
-                    if technique_available(technique_by_id(_CATALOG, t["technique_id"]))]
+        cat = _effective_catalog(thread_id)
+        runnable = [t for t in plan_tasks(world, cat)
+                    if technique_available(technique_by_id(cat, t["technique_id"]))]
         if not runnable:
             print("\n[MISSION] Épuisement : plus aucune tâche exécutable in-scope — fin.")
             return "finish"
