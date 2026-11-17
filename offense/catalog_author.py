@@ -11,7 +11,8 @@ from pathlib import Path
 import yaml
 
 from catalog.loader import Technique, _technique_from_dict
-from offense.guardrails import GuardrailError, destructive_match, shell_metachar, tokenize_argv
+from offense.guardrails import (GuardrailError, destructive_match, host_literals,
+                                 shell_metachar, tokenize_argv)
 from state.mission_io import mission_dir
 
 
@@ -56,11 +57,22 @@ def author_technique(service: str, context: str, llm_invoke) -> Technique | None
         tech = _technique_from_dict(d)
     except (KeyError, TypeError):
         return None
-    tpl = tech.command_template
+    # Garde-fous d'authoring (défense en profondeur, en plus du contrôle à
+    # l'exécution) : pas de métacaractère/destructif ; la cible DOIT être le
+    # placeholder {target} (jamais une valeur en dur) ; aucun autre hôte/IP
+    # littéral (un second hôte littéral = évasion de périmètre à l'exécution).
+    tpl = tech.command_template or ""
+    reject = None
     if shell_metachar(tpl) or destructive_match(tpl):
+        reject = "métacaractère shell ou action destructive"
+    elif "{target}" not in tpl:
+        reject = "gabarit sans placeholder {target} (cible non garantie in-scope)"
+    elif host_literals(tpl):
+        reject = f"hôte/IP littéral interdit : {', '.join(host_literals(tpl))}"
+    if reject:
         try:
             from tools.registry import _audit
-            _audit("LLM_TECH_REJECTED", f"{tech.id}: {tpl}")
+            _audit("LLM_TECH_REJECTED", f"{tech.id}: {reject}: {tpl}")
         except Exception:
             pass
         return None

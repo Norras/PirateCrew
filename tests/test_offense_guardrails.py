@@ -86,3 +86,67 @@ def test_destructive_binaries_without_device():
     for bad in ["shred secret.txt", "wipefs x", "mkswap x", "sgdisk x", "parted x", "badblocks -w x"]:
         assert g.destructive_match(bad), bad
     assert g.destructive_match("badblocks x") is None
+
+
+def _fake_dns(monkeypatch, mapping):
+    """Résolveur DNS déterministe et hors-ligne pour les tests de périmètre."""
+    import scope
+    def fake(name):
+        if name in mapping:
+            return mapping[name]
+        raise OSError("NXDOMAIN")
+    monkeypatch.setattr(scope.socket, "gethostbyname", fake)
+
+
+def test_scope_violations_resolves_out_of_scope_hostname(monkeypatch):
+    # Un nom d'hôte hors périmètre est RÉSOLU puis contrôlé (fix du fail-open critique).
+    set_active_scope(Scope.from_lines(["10.0.0.0/24"]))
+    _fake_dns(monkeypatch, {"evil.example.com": "203.0.113.9"})
+    assert g.scope_violations("nmap -sV evil.example.com") == ["evil.example.com"]
+
+
+def test_scope_violations_allows_in_scope_hostname(monkeypatch):
+    set_active_scope(Scope.from_lines(["10.0.0.0/24"]))
+    _fake_dns(monkeypatch, {"box.lab": "10.0.0.7"})
+    assert g.scope_violations("nmap -sV box.lab") == []
+
+
+def test_scope_violations_flags_decimal_ip_evasion():
+    # 167772169 == 10.0.0.9 (hors périmètre), notation décimale que _IPV4 ne voit pas ; sans DNS.
+    set_active_scope(Scope.from_lines(["127.0.0.1/32"]))
+    assert g.scope_violations("nmap 167772169") == ["167772169"]
+
+
+def test_scope_violations_allows_numeric_port_not_treated_as_ip():
+    # Un port (<= 65535) après -p ne doit PAS être pris pour une IP décimale.
+    set_active_scope(Scope.from_lines(["127.0.0.1/32"]))
+    assert g.scope_violations("nmap -p 445 127.0.0.1") == []
+
+
+def test_scope_violations_flags_proxy_host_in_url(monkeypatch):
+    # {target} rendu in-scope, mais un SECOND hôte littéral (proxy) hors périmètre est capté.
+    set_active_scope(Scope.from_lines(["127.0.0.1/32"]))
+    _fake_dns(monkeypatch, {"evil.example.com": "203.0.113.9"})
+    out = g.scope_violations("curl http://127.0.0.1/ -x http://evil.example.com:8080")
+    assert out == ["evil.example.com"]
+
+
+def test_scope_violations_ignores_output_filename(monkeypatch):
+    # Un nom de fichier (extension connue) ressemble à un FQDN mais ne doit PAS être résolu.
+    set_active_scope(Scope.from_lines(["127.0.0.1/32"]))
+    def boom(name):
+        raise AssertionError(f"DNS appelé pour un nom de fichier : {name}")
+    import scope
+    monkeypatch.setattr(scope.socket, "gethostbyname", boom)
+    assert g.scope_violations("nmap -oN scan.txt 127.0.0.1") == []
+
+
+def test_host_literals_pure_extraction_no_dns(monkeypatch):
+    # host_literals est PUR : extraction + classification, jamais de résolution.
+    import scope
+    def boom(name):
+        raise AssertionError("host_literals ne doit jamais résoudre")
+    monkeypatch.setattr(scope.socket, "gethostbyname", boom)
+    assert g.host_literals("cme smb {target} -u {user}") == []          # placeholders ignorés
+    assert g.host_literals("nmap 10.0.0.5") == ["10.0.0.5"]             # IP littérale
+    assert g.host_literals("nmap evil.example.com") == ["evil.example.com"]  # hôte littéral

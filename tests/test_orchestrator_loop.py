@@ -464,3 +464,44 @@ def test_dry_services_detects_service_without_technique():
     assert "exotic" in orch._dry_services(wm, orch._CATALOG, planned=[])
     wm.add_service("127.0.0.1", 445, name="smb")        # smb a des builtins
     assert "smb" not in orch._dry_services(wm, orch._CATALOG, planned=plan_tasks(wm, orch._CATALOG))
+
+
+def test_node_execute_skips_unfillable_placeholder_without_executing(monkeypatch, tmp_path):
+    # Un gabarit avec un placeholder non remplissable ({share} sans valeur) NE DOIT PAS
+    # s'exécuter en brut : on remonte blocked_missing_input, l'exécuteur n'est jamais appelé.
+    import orchestrator as orch
+    from state import mission_io
+    from catalog.loader import Technique
+    monkeypatch.setattr(mission_io, "MISSIONS_ROOT", tmp_path)
+    monkeypatch.setattr("offense.executor.execute_command",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            AssertionError("ne doit pas exécuter un gabarit non rendu")))
+    tech = Technique(id="llm.share", name="n", domain="ad", service="smb", requires=set(),
+                     tool="smbclient", command_template="smbclient //{target}/{share} -U {user}",
+                     success_signal="ok", provided_by="llm")
+    monkeypatch.setattr(orch, "_CATALOG", [tech])
+    monkeypatch.setattr(orch, "technique_available", lambda t: True)
+    wm = WorldModel(scope=Scope.from_lines(["127.0.0.1/32"]))
+    wm.add_service("127.0.0.1", 445, name="smb")
+    wm.add_credential(Credential(kind="password", principal="admin", secret="x", source="t"))
+    orch._MISSIONS["t_share"] = wm
+    cfg = {"configurable": {"thread_id": "t_share"}}
+    planned = plan_tasks(wm, orch._CATALOG)
+    reports = orch.node_execute({"planned": planned, "rag_context": ""}, cfg)["execution_reports"]
+    r = next(r for r in reports if r["technique"] == "llm.share")
+    assert r["status"] == "blocked_missing_input" and "share" in r["detail"]
+
+
+def test_node_integrate_marks_missing_input_tried(monkeypatch, tmp_path):
+    # blocked_missing_input est marqué 'tried' (boucle-sûr : pas de replanification infinie).
+    import orchestrator as orch
+    from state import mission_io
+    monkeypatch.setattr(mission_io, "MISSIONS_ROOT", tmp_path)
+    wm = WorldModel(scope=Scope.from_lines(["127.0.0.1/32"]))
+    wm.add_service("127.0.0.1", 445, name="smb")
+    orch._MISSIONS["t_mi"] = wm
+    cfg = {"configurable": {"thread_id": "t_mi"}}
+    reports = [{"technique": "llm.share", "host": "127.0.0.1", "service": "smb", "port": 445,
+                "inputs_fp": "", "status": "blocked_missing_input", "detail": "manque {share}"}]
+    orch.node_integrate({"planned": [], "execution_reports": reports, "cycle": 0}, cfg)
+    assert wm.is_tried("127.0.0.1", "smb", "llm.share", inputs_fp="", port=445) is True

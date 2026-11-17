@@ -11,6 +11,7 @@ nom d'hôte d'origine) : c'est cette adresse-là qui a été vérifiée.
 import ipaddress
 import os
 import socket
+import threading
 from datetime import datetime
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -46,18 +47,54 @@ def _audit(action: str, detail: str = "") -> None:
         pass
 
 
+# Résolution DNS bornée (anti-blocage) + cache par mission (latence + OPSEC).
+# Un nom d'hôte n'est résolu qu'une fois par mission ; set_active_scope vide le cache.
+_DNS_TIMEOUT: float = 3.0
+_RESOLVE_CACHE: dict = {}
+
+
+def _gethostbyname_bounded(name: str, timeout: float):
+    """socket.gethostbyname borné par un timeout (thread démon). None si le délai
+    est dépassé (fail-closed : résolveur lent/bloqué non attendu) ou en cas d'échec."""
+    box: dict = {}
+
+    def _work():
+        try:
+            box["ip"] = socket.gethostbyname(name)
+        except Exception as exc:  # gaierror ⊂ OSError, etc. : capturé, jamais propagé
+            box["err"] = exc
+
+    th = threading.Thread(target=_work, daemon=True)
+    th.start()
+    th.join(timeout)
+    if th.is_alive():
+        return None  # on n'attend pas un résolveur bloqué (OPSEC + anti-blocage)
+    return box.get("ip")
+
+
 def _resolve(target: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
-    """Adresse IP de la cible, ou None si elle n'est pas résoluble."""
+    """Adresse IP de la cible, ou None si elle n'est pas résoluble.
+
+    Les IP littérales ne déclenchent aucun appel DNS. Les noms d'hôte sont
+    résolus via une résolution BORNÉE (timeout, fail-closed) et MISE EN CACHE
+    par mission (`_RESOLVE_CACHE`, vidé par `set_active_scope`)."""
     if not isinstance(target, str) or not target:
         return None
     try:
         return ipaddress.ip_address(target)  # IP littérale : aucun appel DNS
     except ValueError:
         pass
-    try:
-        return ipaddress.ip_address(socket.gethostbyname(target))
-    except (OSError, ValueError):  # gaierror ⊂ OSError, UnicodeError ⊂ ValueError
-        return None
+    if target in _RESOLVE_CACHE:
+        return _RESOLVE_CACHE[target]
+    ip_str = _gethostbyname_bounded(target, _DNS_TIMEOUT)
+    resolved = None
+    if ip_str is not None:
+        try:
+            resolved = ipaddress.ip_address(ip_str)
+        except ValueError:  # UnicodeError ⊂ ValueError
+            resolved = None
+    _RESOLVE_CACHE[target] = resolved
+    return resolved
 
 
 class Scope:
@@ -137,9 +174,14 @@ _ACTIVE_SCOPE: Scope | None = None
 
 
 def set_active_scope(scope: Scope | None) -> None:
-    """Définit le périmètre actif du processus (None = tout refuser)."""
+    """Définit le périmètre actif du processus (None = tout refuser).
+
+    Vide aussi le cache de résolution : une nouvelle mission (nouveau périmètre)
+    repart sur des résolutions fraîches, jamais une adresse mise en cache sous un
+    périmètre révolu."""
     global _ACTIVE_SCOPE
     _ACTIVE_SCOPE = scope
+    _RESOLVE_CACHE.clear()
 
 
 def get_active_scope() -> Scope | None:

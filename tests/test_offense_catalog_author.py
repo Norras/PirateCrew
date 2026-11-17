@@ -77,11 +77,13 @@ def test_promote_techniques_to_rag_vide_est_noop():
 
 
 def test_promote_skips_template_with_ip_literal():
-    raw = json.dumps({"id": "llm.smb.x", "name": "x", "service": "smb", "tool": "crackmapexec",
-                      "command_template": "crackmapexec smb 10.0.0.5 -u admin", "success_signal": "Pwn3d"})
-    t = author.author_technique("smb", "ctx", llm_invoke=lambda p: raw)
+    # IP littérale dans le gabarit = spécifique à la mission -> jamais dans le RAG partagé.
+    # Technique construite directement : author_technique la rejetterait désormais en amont.
+    from catalog.loader import Technique
+    t = Technique(id="llm.smb.x", name="x", domain="ad", service="smb", requires=set(),
+                  tool="crackmapexec", command_template="crackmapexec smb 10.0.0.5 -u admin",
+                  success_signal="Pwn3d", provided_by="llm")
     s = _FakeStore()
-    # gabarit à IP littérale = spécifique à la mission -> jamais dans le RAG partagé
     assert author.promote_techniques_to_rag([t], "m1", store=s) == 0
     assert s.calls == []
 
@@ -137,9 +139,11 @@ def test_promote_scans_all_persisted_fields_not_subset():
 
 
 def test_promote_skips_compressed_ipv6_literal():
-    raw = json.dumps({"id": "llm.x.6", "name": "x", "service": "smb", "tool": "nmap",
-                      "command_template": "nmap -6 fe80::1", "success_signal": "ok"})
-    t = author.author_technique("smb", "ctx", llm_invoke=lambda p: raw)
+    # IPv6 littérale dans le gabarit -> jamais promue (construite directement : rejetée à l'authoring).
+    from catalog.loader import Technique
+    t = Technique(id="llm.x.6", name="x", domain="ad", service="smb", requires=set(),
+                  tool="nmap", command_template="nmap -6 fe80::1", success_signal="ok",
+                  provided_by="llm")
     s = _FakeStore()
     assert author.promote_techniques_to_rag([t], "m1", store=s) == 0
     assert s.calls == []
@@ -189,3 +193,31 @@ def test_promote_skips_short_H_hash_via_entropy():
     t = author.author_technique("smb", "ctx", llm_invoke=lambda p: raw)
     s = _FakeStore()
     assert author.promote_techniques_to_rag([t], "m1", store=s) == 0
+
+
+# --- Authoring : le gabarit DOIT cibler {target} et ne porter aucun hôte/IP littéral --- #
+def test_author_rejects_template_without_target():
+    # Pas de {target} -> la cible n'est pas garantie in-scope -> rejet.
+    raw = json.dumps({"id": "llm.x", "service": "smb", "tool": "nmap",
+                      "command_template": "nmap -sV -p 445"})
+    assert author.author_technique("smb", "ctx", llm_invoke=lambda p: raw) is None
+
+
+def test_author_rejects_literal_ip():
+    raw = json.dumps({"id": "llm.x", "service": "smb", "tool": "cme",
+                      "command_template": "cme smb 10.0.0.5 -u {user}"})
+    assert author.author_technique("smb", "ctx", llm_invoke=lambda p: raw) is None
+
+
+def test_author_rejects_literal_host_even_with_target():
+    # {target} présent mais un SECOND hôte littéral (proxy) -> rejet (évasion de périmètre).
+    raw = json.dumps({"id": "llm.x", "service": "http", "tool": "curl",
+                      "command_template": "curl http://{target}/ -x http://evil.example.com:8080"})
+    assert author.author_technique("http", "ctx", llm_invoke=lambda p: raw) is None
+
+
+def test_author_accepts_templated_target():
+    raw = json.dumps({"id": "llm.ok", "service": "smb", "tool": "cme",
+                      "command_template": "cme smb {target} -u {user}", "success_signal": "Pwn3d"})
+    t = author.author_technique("smb", "ctx", llm_invoke=lambda p: raw)
+    assert t is not None and "{target}" in t.command_template

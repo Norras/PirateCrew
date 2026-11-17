@@ -236,14 +236,11 @@ def _split_principal(principal: str) -> tuple:
     return "", principal
 
 
-def _render_template(template: str, host: str, port: int = 0,
-                     creds: list | None = None, context: dict | None = None) -> str:
-    """Rend un gabarit de commande avec {target}/{port} et, si `creds` est non
-    vide, {user}/{domain}/{hash}/{password}/{secret} (depuis creds[0]) ;
-    {share} vient de `context`. Un placeholder inconnu renvoie le gabarit brut,
-    sans lever."""
-    if not template:
-        return ""
+def _render_subs(host: str, port: int = 0, creds: list | None = None,
+                 context: dict | None = None) -> Dict[str, Any]:
+    """Substitutions DISPONIBLES pour un gabarit : {target}/{port}, puis
+    {user}/{domain}/{hash}/{password}/{secret} si `creds`, et {share} si `context`.
+    Un gabarit dont un champ ne figure pas ici n'est pas remplissable."""
     subs: Dict[str, Any] = {"target": host, "port": port}
     if creds:
         domain, user = _split_principal(creds[0].principal)
@@ -251,8 +248,25 @@ def _render_template(template: str, host: str, port: int = 0,
                     password=creds[0].secret, secret=creds[0].secret)
     if context and "share" in context:
         subs["share"] = context["share"]
+    return subs
+
+
+def _template_fields(template: str) -> list[str]:
+    """Champs nommés référencés par un gabarit (`{user}`, `{share}`, …)."""
+    import string
+    return [fn for _, fn, _, _ in string.Formatter().parse(template or "") if fn]
+
+
+def _render_template(template: str, host: str, port: int = 0,
+                     creds: list | None = None, context: dict | None = None) -> str:
+    """Rend un gabarit avec les substitutions disponibles (_render_subs). Un
+    placeholder inconnu renvoie le gabarit brut, sans lever (contrat Projet 1
+    conservé ; le chemin d'exécution, lui, refuse en amont un champ non
+    remplissable au lieu d'exécuter le gabarit brut, cf. node_execute)."""
+    if not template:
+        return ""
     try:
-        return template.format(**subs)
+        return template.format(**_render_subs(host, port, creds, context))
     except (KeyError, IndexError, ValueError):
         return template
 
@@ -754,6 +768,19 @@ def node_execute(state: MissionState, config):
                                 "detail": "Technique LLM proposée, en attente de validation opérateur."})
                 continue
             creds = world.creds_applicable(task["service"])
+            # Refus fail-visible d'un gabarit à placeholder non remplissable (ex. {share}
+            # sans valeur) : on N'exécute PAS un gabarit brut (accolades littérales), on
+            # remonte l'entrée manquante. Le ledger le marque 'tried' (boucle-sûr).
+            _subs = _render_subs(task["host"], port, creds=creds)
+            _missing = sorted({f for f in _template_fields(tech.command_template) if f not in _subs})
+            if _missing:
+                detail = f"Entrée(s) requise(s) non disponible(s) : {', '.join(_missing)}"
+                world.add_evidence({"kind": "missing_input", "technique": tech.id,
+                                    "host": task["host"], "fields": ", ".join(_missing)})
+                reports.append({"technique": tech.id, "host": task["host"], "service": task["service"],
+                                "port": port, "inputs_fp": inputs_fp,
+                                "status": "blocked_missing_input", "detail": detail})
+                continue
             rendered = _render_template(tech.command_template, task["host"], port, creds=creds)
             status, raw = offense.executor.execute_command(rendered, timeout=120)
             world.add_evidence({"phase": "execute", "technique": tech.id, "host": task["host"],
@@ -805,7 +832,8 @@ def node_integrate(state: MissionState, config):
     # replanifiable après installation + relance (Option Y). Clé par (entrées, port).
     for report in reports:
         if report.get("status") in ("done", "error", "blocked_destructive",
-                                    "blocked_out_of_scope", "blocked_shell_meta"):
+                                    "blocked_out_of_scope", "blocked_shell_meta",
+                                    "blocked_missing_input"):
             world.mark_technique(report["host"], report["service"], report["technique"],
                                  report.get("inputs_fp", ""), status="tried",
                                  port=int(report.get("port", 0) or 0))
