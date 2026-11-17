@@ -75,6 +75,18 @@ _IPV4 = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
 # IP pointées (dernier label numérique → non capté ici, traité en IPv4).
 _FQDN_RE = re.compile(r"^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,62})\.)+[A-Za-z][A-Za-z0-9-]{0,62}\.?$")
 
+# Label DNS unique, sans point (localhost, dc01, wpad, noms NetBIOS/AD courts),
+# point final optionnel. Traité comme hôte UNIQUEMENT en position structurée
+# (URL/UNC/user@) : un label nu est indissociable d'un nom d'outil/flag/valeur
+# (nmap, admin, -sV) → jamais hôte hors position d'hôte, sinon faux positif massif.
+_HOSTLABEL_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,62})\.?$")
+
+# Schéma d'URI suivi d'un nombre ANORMAL de slashs (http:/h, http:///h). curl/wget
+# sautent tous les slashs de tête puis lisent l'autorité jusqu'au délimiteur suivant,
+# alors qu'urlparse n'alimente netloc que sur '://' exact : sans renormalisation,
+# http:///IP et http:/IP sont muets alors que l'outil se connecte bien à l'IP.
+_SCHEME_SLASHES_RE = re.compile(r"^([A-Za-z][A-Za-z0-9+.\-]+):/+")  # schéma ≥2 car. (pas un lecteur C:/)
+
 # Extensions de fichier courantes : un token en forme de FQDN mais finissant par
 # l'une d'elles est traité comme un NOM DE FICHIER (donnée), pas un hôte à
 # résoudre. Heuristique anti-faux-positif (ex. `-oN scan.txt`), assumée : un vrai
@@ -116,6 +128,9 @@ def _host_from_token(tok: str) -> tuple[str, bool] | None:
     t = (tok or "").strip().strip("\"'")
     if not t:
         return None
+    m = _SCHEME_SLASHES_RE.match(t)
+    if m:                                            # schéma + slashs anormaux → '://' exact
+        t = m.group(1) + "://" + t[m.end():]
     if "://" in t:                                   # URL
         try:
             h = urlparse(t).hostname
@@ -200,6 +215,8 @@ def _host_kind(cand: str, structured: bool = False) -> str | None:
         if _FQDN_RE.match(cand):
             suffix = cand.rstrip(".").rsplit(".", 1)[-1].lower()  # point final ignoré
             return None if suffix in _NON_HOST_SUFFIXES else "hostname"
+    if structured and _HOSTLABEL_RE.match(cand):      # label unique EN POSITION D'HÔTE
+        return "hostname"                             # (http://localhost/, ssh u@dc01, //wpad/s)
     return None
 
 

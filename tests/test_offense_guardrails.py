@@ -216,3 +216,48 @@ def test_bare_integer_argument_still_not_a_host(monkeypatch):
     assert g.scope_literal_violations("masscan 10.0.0.5 --rate 100000") == []
     assert g.scope_violations("masscan 10.0.0.5 --rate 100000") == []
     assert g.host_literals("masscan 10.0.0.5 --rate 100000") == ["10.0.0.5"]
+
+
+# --- B2 : défaites confirmées par la re-review adversariale (post-055eaa4) ---
+
+def test_scope_flags_mono_label_host_in_structured_position(monkeypatch):
+    # Un hôte à label unique (localhost -> 127.0.0.1, dc01, wpad, noms NetBIOS/AD courts)
+    # en POSITION D'HÔTE structurée (URL/UNC/user@) EST un hôte non ambigu : nc/curl/ssh
+    # s'y connectent. Il doit être résolu et contrôlé (il ne l'était pas : _FQDN_RE exige
+    # un point).
+    set_active_scope(Scope.from_lines(["10.0.0.0/24"]))
+    _fake_dns(monkeypatch, {"localhost": "127.0.0.1", "dc01": "203.0.113.9",
+                            "wpad": "203.0.113.9"})
+    assert g.scope_literal_violations("curl http://localhost/") == ["localhost"]
+    assert g.scope_literal_violations("ssh admin@dc01") == ["dc01"]
+    assert g.scope_literal_violations("smbclient //wpad/share") == ["wpad"]
+
+
+def test_bare_mono_label_token_not_a_host(monkeypatch):
+    # Non-régression FP CRITIQUE : un token mono-label NU (nom d'outil, flag, valeur)
+    # n'est JAMAIS un hôte — sinon 'nmap'/'smb'/'admin' seraient résolus = FP massif.
+    # Seule la POSITION structurée fait d'un label unique un hôte (cf. test ci-dessus).
+    set_active_scope(Scope.from_lines(["10.0.0.0/24"]))
+    def boom(name):
+        raise AssertionError(f"résolution interdite d'un token nu : {name}")
+    monkeypatch.setattr(__import__("scope").socket, "gethostbyname", boom)
+    assert g.scope_literal_violations("nmap -sV 10.0.0.5") == []
+    assert g.scope_violations("nmap -sV 10.0.0.5") == []
+    assert g.host_literals("nmap -sV 10.0.0.5") == ["10.0.0.5"]
+    for nu in ["nmap", "smb", "admin", "crackmapexec", "-u", "-sV"]:
+        assert g._host_kind(nu) is None, nu
+
+
+def test_scope_flags_url_slash_confusion_literal_ip(monkeypatch):
+    # http:///IP et http:/IP : urlparse voit un hôte vide (netloc alimenté sur '://' exact
+    # seulement), mais curl/wget normalisent et se connectent à l'IP. On normalise le
+    # nombre de slashs -> l'IP hors périmètre est extraite et signalée, SANS DNS.
+    set_active_scope(Scope.from_lines(["10.0.0.0/24"]))
+    def boom(name):
+        raise AssertionError(f"DNS interdit sur une IP littérale : {name}")
+    monkeypatch.setattr(__import__("scope").socket, "gethostbyname", boom)
+    assert g.scope_violations("curl http:///169.254.169.254/latest/meta-data/") == ["169.254.169.254"]
+    assert g.scope_violations("curl http:/203.0.113.9/") == ["203.0.113.9"]
+    assert g.scope_literal_violations("curl http:///169.254.169.254/") == ["169.254.169.254"]
+    # Forme normale ('://' exact) : extraite comme avant, jamais sur-normalisée.
+    assert g.scope_violations("curl http://10.0.0.5/") == []

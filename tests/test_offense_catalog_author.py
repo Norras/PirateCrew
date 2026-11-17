@@ -229,3 +229,28 @@ def test_author_accepts_rate_flag():
                       "command_template": "masscan {target} --rate 100000 -p445", "success_signal": "open"})
     t = author.author_technique("smb", "ctx", llm_invoke=lambda p: raw)
     assert t is not None
+
+
+def test_author_rejects_placeholder_glued_to_literal_host():
+    # Évasion de périmètre (re-review 17/11) : {target} collé à un domaine attaquant.
+    # host_literals() seul ne le voit pas (les accolades cassent la classification), mais
+    # au rendu l'hôte '10.0.0.5.evil.com' NAÎT et échappe aux deux couches. Rejet par
+    # substitution sentinelle du gabarit à l'authoring (chemin LLM non fiable).
+    for tpl in ["curl http://{target}.evil.com/",
+                "nmap -sV {target}.evil.example.com",
+                "curl http://{target}@localhost/"]:
+        raw = json.dumps({"id": "llm.x", "service": "http", "tool": "curl",
+                          "command_template": tpl})
+        assert author.author_technique("http", "ctx", llm_invoke=lambda p: raw) is None, tpl
+
+
+def test_author_accepts_legit_placeholder_templates():
+    # Non-régression : les gabarits normaux (placeholder en position d'hôte, port, chemin,
+    # fichier de sortie) ne déclenchent PAS la détection de collage.
+    for tpl in ["crackmapexec smb {target} -u {user} -H {hash}",
+                "curl http://{target}:{port}/{path}",
+                "smbclient //{target}/{share} -U {user}",
+                "nmap -p {port} -oN {output}.txt {target}"]:
+        raw = json.dumps({"id": "llm.ok", "service": "smb", "tool": "x",
+                          "command_template": tpl, "success_signal": "ok"})
+        assert author.author_technique("smb", "ctx", llm_invoke=lambda p: raw) is not None, tpl

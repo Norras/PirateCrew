@@ -46,6 +46,26 @@ def parse_technique(raw: str) -> dict | None:
     return obj if isinstance(obj, dict) else None
 
 
+# Détection d'un hôte FORGÉ par collage d'un placeholder à un littéral
+# (`{target}.evil.com` → au rendu `10.0.0.5.evil.com`). Les accolades cassent la
+# classification d'hôte, donc `host_literals(gabarit)` ne voit rien ; on substitue
+# chaque placeholder par un label sentinelle, puis on relit les hôtes littéraux :
+# tout hôte matérialisé AUTRE que la sentinelle nue (= le placeholder seul en
+# position d'hôte, légitime) trahit un collage → évasion de périmètre au rendu.
+_PLACEHOLDER_RE = re.compile(r"\{[^{}]*\}")
+_SENTINEL = "placeholderhost"                        # label DNS valide, mono-label
+
+
+def _materialized_host_literals(template: str) -> list[str]:
+    """Hôtes qui NAISSENT d'un placeholder collé à un littéral dans `template`. Pur."""
+    subbed = _PLACEHOLDER_RE.sub(_SENTINEL, template)
+    out: list[str] = []
+    for h in host_literals(subbed):
+        if h.replace(_SENTINEL, "").strip(".") != "":  # reste des caractères autour → forgé
+            out.append(h)
+    return out
+
+
 def author_technique(service: str, context: str, llm_invoke) -> Technique | None:
     """Technique tagguée `llm` ou None si illisible / gabarit refusé."""
     d = parse_technique(llm_invoke(build_author_prompt(service, context)))
@@ -69,6 +89,11 @@ def author_technique(service: str, context: str, llm_invoke) -> Technique | None
         reject = "gabarit sans placeholder {target} (cible non garantie in-scope)"
     elif host_literals(tpl):
         reject = f"hôte/IP littéral interdit : {', '.join(host_literals(tpl))}"
+    else:
+        glued = _materialized_host_literals(tpl)
+        if glued:                                     # {target}.evil.com → hôte forgé au rendu
+            reject = ("placeholder collé à un hôte littéral (hôte forgé au rendu, "
+                      f"évasion de périmètre) : {', '.join(glued)}")
     if reject:
         try:
             from tools.registry import _audit
