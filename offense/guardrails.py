@@ -97,6 +97,27 @@ _NON_HOST_SUFFIXES = frozenset({
     "zip", "gz", "tgz", "tar", "bz2", "7z", "rar", "bak", "dump", "db", "sqlite",
     "pem", "key", "crt", "cer", "pfx", "p12", "sh", "py", "pl", "rb", "ps1",
     "exe", "dll", "so", "bin", "dat", "out", "nmap", "gnmap", "lst", "wordlist",
+    # formats de sortie/capture offensifs courants (noms de FICHIERS, pas des hôtes)
+    "pcap", "pcapng", "cap", "scan", "report", "results", "ndjson", "jsonl",
+    "har", "nessus",
+})
+
+# Schémas d'URI qui EXIGENT une autorité réseau : seuls ceux-là voient leurs slashs
+# de tête renormalisés (http:/h, http:///h → http://h). Un schéma à autorité vide
+# (file:, data:, classpath:, jar:…) N'est PAS renormalisé, sinon le 1er segment de
+# chemin deviendrait un hôte fantôme (file:///etc/passwd → 'etc').
+_NETWORK_SCHEMES: frozenset[str] = frozenset({
+    "http", "https", "ftp", "ftps", "sftp", "ssh", "scp", "smb", "cifs", "telnet",
+    "ldap", "ldaps", "rdp", "vnc", "rtsp", "ws", "wss", "redis", "mysql", "mssql",
+    "mongodb", "gopher", "dict", "rsync", "nfs",
+})
+
+# Flags dont la VALEUR est une identité/un secret (user@realm, mot de passe, hash),
+# jamais une cible de connexion : on n'extrait pas d'hôte du token qui suit. Évite
+# de prendre un UPN/NetBIOS (-u svc@CONTOSO) ou un domaine (-d corp.local) pour un hôte.
+_IDENTITY_FLAGS: frozenset[str] = frozenset({
+    "-u", "--user", "--username", "-U", "-p", "--password", "--pass",
+    "-d", "--domain", "-H", "--hashes", "--hash",
 })
 
 
@@ -129,8 +150,8 @@ def _host_from_token(tok: str) -> tuple[str, bool] | None:
     if not t:
         return None
     m = _SCHEME_SLASHES_RE.match(t)
-    if m:                                            # schéma + slashs anormaux → '://' exact
-        t = m.group(1) + "://" + t[m.end():]
+    if m and m.group(1).lower() in _NETWORK_SCHEMES:  # schéma RÉSEAU + slashs anormaux → '://'
+        t = m.group(1) + "://" + t[m.end():]          # (jamais file:/data: → pas d'hôte fantôme)
     if "://" in t:                                   # URL
         try:
             h = urlparse(t).hostname
@@ -163,7 +184,12 @@ def _host_candidates(rendered: str) -> list[tuple[str, bool]]:
         tokens = (rendered or "").split()
     out: list[tuple[str, bool]] = []
     pos: dict[str, int] = {}
+    prev = ""
     for tok in tokens:
+        is_identity_value = prev in _IDENTITY_FLAGS   # valeur d'un -u/-p/-d/-H… : identité, pas hôte
+        prev = tok
+        if is_identity_value:
+            continue
         res = _host_from_token(tok)
         if res is None:
             continue
@@ -179,11 +205,20 @@ def _host_candidates(rendered: str) -> list[tuple[str, bool]]:
 
 def _normalize_ipv4_any(cand: str) -> str | None:
     """IPv4 pointée normalisée si `cand` est une forme acceptée par inet_aton
-    (décimale/octale/hexadécimale pointée, comme nmap/curl), sinon None. Pur."""
+    (décimale/octale/hexadécimale pointée, comme nmap/curl), sinon None. Pur.
+
+    Un point final unique (racine DNS : 203.0.113.9.) est retiré avant inet_aton :
+    inet_aton le rejette alors que getaddrinfo/curl l'acceptent et se connectent."""
     try:
         return socket.inet_ntoa(socket.inet_aton(cand))
     except (OSError, UnicodeError, TypeError):
-        return None
+        pass
+    if cand.endswith(".") and not cand.endswith(".."):
+        try:
+            return socket.inet_ntoa(socket.inet_aton(cand[:-1]))
+        except (OSError, UnicodeError, TypeError):
+            return None
+    return None
 
 
 def _host_kind(cand: str, structured: bool = False) -> str | None:
@@ -213,6 +248,8 @@ def _host_kind(cand: str, structured: bool = False) -> str | None:
         if _IPV4.fullmatch(cand):                     # 4 décimaux mais invalide (ex. 256.0.0.1)
             return "bad_ipv4"
         if _FQDN_RE.match(cand):
+            if structured:                            # position d'hôte d'URL/UNC : TOUJOURS un
+                return "hostname"                     # hôte (TLD .zip/.sh inclus), jamais un fichier
             suffix = cand.rstrip(".").rsplit(".", 1)[-1].lower()  # point final ignoré
             return None if suffix in _NON_HOST_SUFFIXES else "hostname"
     if structured and _HOSTLABEL_RE.match(cand):      # label unique EN POSITION D'HÔTE

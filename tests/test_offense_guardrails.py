@@ -261,3 +261,59 @@ def test_scope_flags_url_slash_confusion_literal_ip(monkeypatch):
     assert g.scope_literal_violations("curl http:///169.254.169.254/") == ["169.254.169.254"]
     # Forme normale ('://' exact) : extraite comme avant, jamais sur-normalisée.
     assert g.scope_violations("curl http://10.0.0.5/") == []
+
+
+# --- B3 : défaites + régressions confirmées par la re-review round 2 ---
+
+def test_scope_flags_trailing_dot_ipv4_literal(monkeypatch):
+    # IPv4 à point final (203.0.113.9.) : inet_aton la REJETTE mais curl/getaddrinfo
+    # retirent la racine DNS et s'y connectent. On retire un point final unique ->
+    # l'IP hors périmètre est signalée, SANS DNS.
+    set_active_scope(Scope.from_lines(["10.0.0.0/24"]))
+    def boom(name):
+        raise AssertionError(f"DNS interdit sur une IP littérale : {name}")
+    monkeypatch.setattr(__import__("scope").socket, "gethostbyname", boom)
+    assert g.scope_violations("nc 203.0.113.9. 4444") == ["203.0.113.9."]
+    assert g.scope_violations("curl http://169.254.169.254./latest/meta-data/") == ["169.254.169.254."]
+    assert g.scope_literal_violations("curl http://203.0.113.9./") == ["203.0.113.9."]
+
+
+def test_scope_flags_residual_tld_host_in_url_position(monkeypatch):
+    # Un littéral en TLD-résiduel (.zip/.sh) EN POSITION D'HÔTE d'URL est un hôte
+    # (jamais un fichier) -> résolu et contrôlé. Le filtre d'extensions ne vaut que
+    # pour les tokens NUS (noms de fichiers).
+    set_active_scope(Scope.from_lines(["10.0.0.0/24"]))
+    _fake_dns(monkeypatch, {"evil.zip": "203.0.113.9", "get.sh": "203.0.113.9"})
+    assert g.scope_literal_violations("curl http://evil.zip/x") == ["evil.zip"]
+    assert g.scope_literal_violations("curl http://get.sh/") == ["get.sh"]
+
+
+def test_bare_filename_suffix_still_not_a_host():
+    # Non-régression : un nom de fichier NU avec extension connue (y compris .zip et les
+    # formats de sortie offensifs) n'est PAS un hôte (donnée, pas position d'hôte).
+    set_active_scope(Scope.from_lines(["10.0.0.0/24"]))
+    assert g.host_literals("nmap -oN scan.zip 10.0.0.5") == ["10.0.0.5"]
+    for f in ["loot.pcap", "out.scan", "x.report", "a.cap", "r.results", "c.ndjson"]:
+        assert g._host_kind(f) is None, f
+
+
+def test_file_scheme_not_mangled_into_host():
+    # Régression B2 corrigée : la renormalisation de slashs ne s'applique QU'aux schémas
+    # réseau. file:///chemin, classpath:/, data:/ ne doivent PAS fabriquer d'hôte fantôme.
+    set_active_scope(Scope.from_lines(["10.0.0.0/24"]))
+    assert g.host_literals("curl file:///etc/passwd") == []
+    assert g.host_literals("curl file:/etc/passwd") == []
+    assert g.host_literals("java -cp classpath:/app 10.0.0.5") == ["10.0.0.5"]
+    # mais un schéma RÉSEAU à slashs anormaux reste normalisé (contournement fermé)
+    assert g.scope_violations("curl http:///203.0.113.9/") == ["203.0.113.9"]
+
+
+def test_identity_flag_value_not_treated_as_host(monkeypatch):
+    # Régression B2 corrigée : la valeur d'un flag d'identité (-u user@DOMAIN, -d domain)
+    # est un identifiant (UPN/NetBIOS), pas un hôte -> jamais résolue ni contrôlée.
+    set_active_scope(Scope.from_lines(["10.0.0.0/24"]))
+    def boom(name):
+        raise AssertionError(f"DNS interdit sur une identité : {name}")
+    monkeypatch.setattr(__import__("scope").socket, "gethostbyname", boom)
+    assert g.scope_literal_violations("crackmapexec smb 10.0.0.5 -u svc@CONTOSO -p pw") == []
+    assert g.scope_literal_violations("cme smb 10.0.0.5 -u admin@corp.local -p pw") == []

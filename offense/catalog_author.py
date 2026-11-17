@@ -11,7 +11,8 @@ from pathlib import Path
 import yaml
 
 from catalog.loader import Technique, _technique_from_dict
-from offense.guardrails import (GuardrailError, destructive_match, host_literals,
+from offense.guardrails import (GuardrailError, _host_candidates, _host_kind,
+                                 destructive_match, host_literals,
                                  shell_metachar, tokenize_argv)
 from state.mission_io import mission_dir
 
@@ -53,16 +54,32 @@ def parse_technique(raw: str) -> dict | None:
 # tout hôte matérialisé AUTRE que la sentinelle nue (= le placeholder seul en
 # position d'hôte, légitime) trahit un collage → évasion de périmètre au rendu.
 _PLACEHOLDER_RE = re.compile(r"\{[^{}]*\}")
-_SENTINEL = "placeholderhost"                        # label DNS valide, mono-label
+_TARGET_SENTINEL = "targetsentinelhost"              # {target} = seule place sanctionnée in-scope
+_OTHER_SENTINEL = "othersentinelhost"                # tout AUTRE placeholder
 
 
 def _materialized_host_literals(template: str) -> list[str]:
-    """Hôtes qui NAISSENT d'un placeholder collé à un littéral dans `template`. Pur."""
-    subbed = _PLACEHOLDER_RE.sub(_SENTINEL, template)
+    """Hôtes RENDUS en position d'hôte qui ne sont PAS exactement {target}. Pur.
+
+    Les accolades cassent la classification d'hôte, donc `host_literals(gabarit)` ne
+    voit rien. On substitue {target} par une sentinelle et TOUT AUTRE placeholder par
+    une sentinelle DISTINCTE, puis on relit les hôtes : tout hôte ≠ sentinelle {target}
+    nue — placeholder frère en position d'hôte ({domain}/{share}/{user}@), ou {target}
+    collé à un littéral / à un autre placeholder — trahit une position d'hôte non
+    sanctionnée (évasion de périmètre au rendu). Seul {target} est garanti in-scope ;
+    un placeholder NU hors position d'hôte (nmap {target} {domain}) reste un résiduel
+    assumé, comme un token nu."""
+    def _sub(m: "re.Match[str]") -> str:
+        return _TARGET_SENTINEL if m.group(0) == "{target}" else _OTHER_SENTINEL
+    subbed = _PLACEHOLDER_RE.sub(_sub, template)
     out: list[str] = []
-    for h in host_literals(subbed):
-        if h.replace(_SENTINEL, "").strip(".") != "":  # reste des caractères autour → forgé
-            out.append(h)
+    for cand, structured in _host_candidates(subbed):
+        if _host_kind(cand, structured) is None:
+            continue
+        if cand == _TARGET_SENTINEL:                 # {target} seul en position d'hôte : OK
+            continue
+        if cand not in out:
+            out.append(cand)
     return out
 
 

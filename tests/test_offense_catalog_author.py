@@ -254,3 +254,31 @@ def test_author_accepts_legit_placeholder_templates():
         raw = json.dumps({"id": "llm.ok", "service": "smb", "tool": "x",
                           "command_template": tpl, "success_signal": "ok"})
         assert author.author_technique("smb", "ctx", llm_invoke=lambda p: raw) is not None, tpl
+
+
+def test_author_rejects_non_target_placeholder_in_host_position():
+    # Round 2 : seul {target} est sanctionné in-scope. Un AUTRE placeholder en position
+    # d'hôte (ou {target} collé à un autre) se matérialise hors périmètre au rendu
+    # (corp.local via creds) -> rejet à l'authoring LLM (invariant {target} par position).
+    for tpl in ["curl http://{domain}/ {target}",
+                "curl -x http://{domain}:{port} {target}",
+                "ssh {user}@{domain} {target}",
+                "smbclient //{share}/x {target}",
+                "curl http://{target}.{domain}/"]:
+        raw = json.dumps({"id": "llm.x", "service": "http", "tool": "curl",
+                          "command_template": tpl})
+        assert author.author_technique("http", "ctx", llm_invoke=lambda p: raw) is None, tpl
+
+
+def test_author_accepts_capture_and_identity_templates():
+    # Régression B2 corrigée : gabarits légitimes de capture/sortie et identités AD
+    # (UPN/NetBIOS, domaine en argument -d) ne doivent PLUS être rejetés.
+    for tpl in ["tcpdump -w {output}.pcap host {target}",
+                "tshark -w {capture}.cap host {target}",
+                "nmap {target} -oA {output}.report",
+                "nmap {target} -oN {output}.scan",
+                "crackmapexec smb {target} -u {user} -d {domain}.local",
+                "crackmapexec smb {target} -u {user}@{domain} -p {password}"]:
+        raw = json.dumps({"id": "llm.ok", "service": "smb", "tool": "x",
+                          "command_template": tpl, "success_signal": "ok"})
+        assert author.author_technique("smb", "ctx", llm_invoke=lambda p: raw) is not None, tpl
