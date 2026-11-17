@@ -98,55 +98,72 @@ def _fake_dns(monkeypatch, mapping):
     monkeypatch.setattr(scope.socket, "gethostbyname", fake)
 
 
-def test_scope_violations_resolves_out_of_scope_hostname(monkeypatch):
-    # Un nom d'hôte hors périmètre est RÉSOLU puis contrôlé (fix du fail-open critique).
+# --- scope_violations : backstop sur la commande RENDUE, IP LITTÉRALES seulement (sans DNS, sans FP) ---
+def test_scope_violations_rendered_ip_only_out_of_scope():
     set_active_scope(Scope.from_lines(["10.0.0.0/24"]))
-    _fake_dns(monkeypatch, {"evil.example.com": "203.0.113.9"})
-    assert g.scope_violations("nmap -sV evil.example.com") == ["evil.example.com"]
+    assert g.scope_violations("nmap 203.0.113.9") == ["203.0.113.9"]  # IP pointée hors périmètre
+    assert g.scope_violations("nmap 10.0.0.5") == []                   # IP pointée in-scope
 
 
-def test_scope_violations_allows_in_scope_hostname(monkeypatch):
+def test_scope_violations_rendered_ignores_hostname_and_rate(monkeypatch):
+    # FP écartés : un domaine (arg d'identité) et un grand entier (débit) rendus ne sont PAS
+    # pris pour des IP -> pas de sur-blocage, et AUCUN DNS sur ce backstop.
     set_active_scope(Scope.from_lines(["10.0.0.0/24"]))
-    _fake_dns(monkeypatch, {"box.lab": "10.0.0.7"})
-    assert g.scope_violations("nmap -sV box.lab") == []
-
-
-def test_scope_violations_flags_decimal_ip_evasion():
-    # 167772169 == 10.0.0.9 (hors périmètre), notation décimale que _IPV4 ne voit pas ; sans DNS.
-    set_active_scope(Scope.from_lines(["127.0.0.1/32"]))
-    assert g.scope_violations("nmap 167772169") == ["167772169"]
-
-
-def test_scope_violations_allows_numeric_port_not_treated_as_ip():
-    # Un port (<= 65535) après -p ne doit PAS être pris pour une IP décimale.
-    set_active_scope(Scope.from_lines(["127.0.0.1/32"]))
-    assert g.scope_violations("nmap -p 445 127.0.0.1") == []
-
-
-def test_scope_violations_flags_proxy_host_in_url(monkeypatch):
-    # {target} rendu in-scope, mais un SECOND hôte littéral (proxy) hors périmètre est capté.
-    set_active_scope(Scope.from_lines(["127.0.0.1/32"]))
-    _fake_dns(monkeypatch, {"evil.example.com": "203.0.113.9"})
-    out = g.scope_violations("curl http://127.0.0.1/ -x http://evil.example.com:8080")
-    assert out == ["evil.example.com"]
-
-
-def test_scope_violations_ignores_output_filename(monkeypatch):
-    # Un nom de fichier (extension connue) ressemble à un FQDN mais ne doit PAS être résolu.
-    set_active_scope(Scope.from_lines(["127.0.0.1/32"]))
     def boom(name):
-        raise AssertionError(f"DNS appelé pour un nom de fichier : {name}")
-    import scope
-    monkeypatch.setattr(scope.socket, "gethostbyname", boom)
+        raise AssertionError(f"DNS interdit sur le backstop IP-only : {name}")
+    monkeypatch.setattr(__import__("scope").socket, "gethostbyname", boom)
+    assert g.scope_violations("cme smb 10.0.0.1 -u admin -d corp.local") == []
+    assert g.scope_violations("masscan 10.0.0.1 --rate 100000") == []
+
+
+def test_scope_violations_rendered_flags_dotted_octal_ip():
+    # 0177.0.0.1 == 127.0.0.1 (octal pointé, accepté par nmap/curl via inet_aton), hors périmètre.
+    set_active_scope(Scope.from_lines(["10.0.0.0/24"]))
+    assert g.scope_violations("nmap -sV 10.0.0.5 0177.0.0.1") == ["0177.0.0.1"]
+
+
+def test_scope_violations_rendered_ignores_filename():
+    # Un nom de fichier (extension connue) n'est pas une IP -> jamais signalé.
+    set_active_scope(Scope.from_lines(["127.0.0.1/32"]))
     assert g.scope_violations("nmap -oN scan.txt 127.0.0.1") == []
 
 
-def test_host_literals_pure_extraction_no_dns(monkeypatch):
-    # host_literals est PUR : extraction + classification, jamais de résolution.
+# --- host_literals : PUR (authoring + contrôle sur gabarit), jamais de résolution ---
+def test_host_literals_pure_no_dns(monkeypatch):
     import scope
-    def boom(name):
-        raise AssertionError("host_literals ne doit jamais résoudre")
-    monkeypatch.setattr(scope.socket, "gethostbyname", boom)
-    assert g.host_literals("cme smb {target} -u {user}") == []          # placeholders ignorés
-    assert g.host_literals("nmap 10.0.0.5") == ["10.0.0.5"]             # IP littérale
-    assert g.host_literals("nmap evil.example.com") == ["evil.example.com"]  # hôte littéral
+    monkeypatch.setattr(scope.socket, "gethostbyname",
+                        lambda n: (_ for _ in ()).throw(AssertionError("host_literals ne résout jamais")))
+    assert g.host_literals("cme smb {target} -u {user} -d {domain}") == []      # placeholders ignorés
+    assert g.host_literals("nmap 10.0.0.5") == ["10.0.0.5"]                      # IP pointée
+    assert g.host_literals("nmap evil.example.com") == ["evil.example.com"]      # FQDN
+    assert g.host_literals("nmap -sV {target} 0177.0.0.1") == ["0177.0.0.1"]     # octal pointé
+    assert g.host_literals("masscan {target} --rate 100000") == []              # entier nu != hôte
+
+
+# --- scope_literal_violations : contrôle sur le GABARIT (résout les noms ; modèle "résous + report") ---
+def test_scope_literal_violations_resolves_out_of_scope_hostname(monkeypatch):
+    set_active_scope(Scope.from_lines(["10.0.0.0/24"]))
+    _fake_dns(monkeypatch, {"evil.example.com": "203.0.113.9"})
+    assert g.scope_literal_violations("nmap -sV {target} evil.example.com") == ["evil.example.com"]
+
+
+def test_scope_literal_violations_allows_in_scope_hostname(monkeypatch):
+    set_active_scope(Scope.from_lines(["10.0.0.0/24"]))
+    _fake_dns(monkeypatch, {"box.lab": "10.0.0.7"})
+    assert g.scope_literal_violations("nmap -sV {target} box.lab") == []
+
+
+def test_scope_literal_violations_flags_proxy_host_in_url(monkeypatch):
+    set_active_scope(Scope.from_lines(["10.0.0.0/24"]))
+    _fake_dns(monkeypatch, {"evil.example.com": "203.0.113.9"})
+    assert g.scope_literal_violations(
+        "curl http://{target}/ -x http://evil.example.com:8080") == ["evil.example.com"]
+
+
+def test_scope_literal_violations_ignores_placeholders_and_rate(monkeypatch):
+    # {domain}/{share} sont des placeholders, un débit est un entier nu : aucun n'est un hôte,
+    # donc aucune résolution et aucun sur-blocage (fin des FP domaine/débit).
+    set_active_scope(Scope.from_lines(["10.0.0.0/24"]))
+    monkeypatch.setattr(__import__("scope").socket, "gethostbyname",
+                        lambda n: (_ for _ in ()).throw(AssertionError(f"résolution inattendue : {n}")))
+    assert g.scope_literal_violations("cme smb {target} -u {user} -d {domain} --rate 100000") == []

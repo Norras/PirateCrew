@@ -492,6 +492,57 @@ def test_node_execute_skips_unfillable_placeholder_without_executing(monkeypatch
     assert r["status"] == "blocked_missing_input" and "share" in r["detail"]
 
 
+def test_node_execute_blocks_out_of_scope_literal_ip(monkeypatch, tmp_path):
+    # Un hôte LITTÉRAL hors périmètre dans le gabarit (opérateur/LLM) est bloqué AVANT
+    # exécution (contrôle sur le gabarit), l'exécuteur n'est jamais appelé.
+    import orchestrator as orch
+    from state import mission_io
+    from catalog.loader import Technique
+    monkeypatch.setattr(mission_io, "MISSIONS_ROOT", tmp_path)
+    monkeypatch.setattr("offense.executor.execute_command",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            AssertionError("ne doit pas exécuter une technique hors périmètre")))
+    tech = Technique(id="op.x", name="n", domain="network", service="smb", requires=set(),
+                     tool="nmap", command_template="nmap -sV {target} 10.0.0.9",
+                     success_signal="open", provided_by="operator")
+    monkeypatch.setattr(orch, "_CATALOG", [tech])
+    monkeypatch.setattr(orch, "technique_available", lambda t: True)
+    wm = WorldModel(scope=Scope.from_lines(["127.0.0.1/32"]))
+    wm.add_service("127.0.0.1", 445, name="smb")
+    orch._MISSIONS["t_oos"] = wm
+    cfg = {"configurable": {"thread_id": "t_oos"}}
+    planned = plan_tasks(wm, orch._CATALOG)
+    reports = orch.node_execute({"planned": planned, "rag_context": ""}, cfg)["execution_reports"]
+    r = next(r for r in reports if r["technique"] == "op.x")
+    assert r["status"] == "blocked_out_of_scope" and "10.0.0.9" in r["detail"]
+
+
+def test_node_execute_blocks_out_of_scope_hostname_resolving(monkeypatch, tmp_path):
+    # Un NOM D'HÔTE littéral est résolu puis contrôlé à l'exécution (modèle "résous + report").
+    import orchestrator as orch
+    import scope
+    from state import mission_io
+    from catalog.loader import Technique
+    monkeypatch.setattr(mission_io, "MISSIONS_ROOT", tmp_path)
+    monkeypatch.setattr(scope.socket, "gethostbyname",
+                        lambda n: "203.0.113.9" if n == "evil.example.com" else (_ for _ in ()).throw(OSError()))
+    monkeypatch.setattr("offense.executor.execute_command",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("ne doit pas exécuter")))
+    tech = Technique(id="op.h", name="n", domain="network", service="smb", requires=set(),
+                     tool="nmap", command_template="nmap -sV {target} evil.example.com",
+                     success_signal="open", provided_by="operator")
+    monkeypatch.setattr(orch, "_CATALOG", [tech])
+    monkeypatch.setattr(orch, "technique_available", lambda t: True)
+    wm = WorldModel(scope=Scope.from_lines(["10.0.0.0/24"]))
+    wm.add_service("10.0.0.5", 445, name="smb")
+    orch._MISSIONS["t_h"] = wm
+    cfg = {"configurable": {"thread_id": "t_h"}}
+    reports = orch.node_execute({"planned": plan_tasks(wm, orch._CATALOG), "rag_context": ""},
+                                cfg)["execution_reports"]
+    r = next(r for r in reports if r["technique"] == "op.h")
+    assert r["status"] == "blocked_out_of_scope" and "evil.example.com" in r["detail"]
+
+
 def test_node_integrate_marks_missing_input_tried(monkeypatch, tmp_path):
     # blocked_missing_input est marqué 'tried' (boucle-sûr : pas de replanification infinie).
     import orchestrator as orch

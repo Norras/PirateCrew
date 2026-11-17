@@ -93,7 +93,12 @@ def _resolve(target: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | Non
             resolved = ipaddress.ip_address(ip_str)
         except ValueError:  # UnicodeError ⊂ ValueError
             resolved = None
-    _RESOLVE_CACHE[target] = resolved
+    if resolved is not None:
+        # On ne met en cache QUE les succès : un échec transitoire (timeout borné,
+        # résolveur momentanément indisponible) ne doit pas empoisonner un hôte
+        # in-scope pour toute la mission. Un nom durablement non résoluble sera
+        # re-tenté (borné) à chaque appel — coût négligeable (littéraux rares).
+        _RESOLVE_CACHE[target] = resolved
     return resolved
 
 

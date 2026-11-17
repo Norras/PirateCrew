@@ -221,3 +221,11 @@ def test_author_accepts_templated_target():
                       "command_template": "cme smb {target} -u {user}", "success_signal": "Pwn3d"})
     t = author.author_technique("smb", "ctx", llm_invoke=lambda p: raw)
     assert t is not None and "{target}" in t.command_template
+
+
+def test_author_accepts_rate_flag():
+    # un grand entier (débit) n'est pas un hôte littéral -> scan rapide autorisé (fin du FP débit).
+    raw = json.dumps({"id": "llm.ms", "service": "smb", "tool": "masscan",
+                      "command_template": "masscan {target} --rate 100000 -p445", "success_signal": "open"})
+    t = author.author_technique("smb", "ctx", llm_invoke=lambda p: raw)
+    assert t is not None

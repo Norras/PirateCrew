@@ -768,6 +768,21 @@ def node_execute(state: MissionState, config):
                                 "detail": "Technique LLM proposée, en attente de validation opérateur."})
                 continue
             creds = world.creds_applicable(task["service"])
+            # Périmètre (contrôle de référence) : tout hôte LITTÉRAL du gabarit doit être
+            # in-scope — les noms sont résolus. {target} est in-scope par construction ;
+            # {domain}/{share} sont des identités, pas des hôtes. Hors périmètre -> on
+            # n'exécute pas, on remonte à l'opérateur (qui peut l'ajouter au périmètre).
+            from offense.guardrails import scope_literal_violations as _scope_literal_violations
+            _bad_scope = _scope_literal_violations(tech.command_template)
+            if _bad_scope:
+                detail = (f"Hôte(s) hors périmètre : {', '.join(_bad_scope)} — "
+                          f"ajoutez-les au périmètre (scope.txt) pour les autoriser.")
+                world.add_evidence({"kind": "out_of_scope", "technique": tech.id,
+                                    "host": task["host"], "literals": ", ".join(_bad_scope)})
+                reports.append({"technique": tech.id, "host": task["host"], "service": task["service"],
+                                "port": port, "inputs_fp": inputs_fp,
+                                "status": "blocked_out_of_scope", "detail": detail})
+                continue
             # Refus fail-visible d'un gabarit à placeholder non remplissable (ex. {share}
             # sans valeur) : on N'exécute PAS un gabarit brut (accolades littérales), on
             # remonte l'entrée manquante. Le ledger le marque 'tried' (boucle-sûr).

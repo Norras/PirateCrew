@@ -1,20 +1,28 @@
-"""Garde-fous offensifs : contrôles sur une commande déjà rendue.
+"""Garde-fous offensifs : contrôles sur une commande.
 
-`shell_metachar`, `destructive_match`, `tokenize_argv` et l'extraction d'hôtes
-(`host_literals`, `_host_candidates`) sont purs. En revanche
-`scope_violations`/`evaluate` APPLIQUENT le périmètre par RÉSOLUTION : chaque
-token en forme d'hôte (IP littérale toutes notations, URL, UNC, user@h, h:port,
-ou nom d'hôte) est passé par `assert_in_scope`, qui résout les noms (résolution
-bornée + mise en cache, cf. scope.py) et journalise les refus (OUT_OF_SCOPE).
-Ces deux fonctions font donc de la résolution réseau et un effet de bord
-d'audit — fail-closed : hors périmètre, non résoluble, ou sans périmètre actif
-⇒ violation (l'opérateur peut alors ajouter la cible au périmètre). La denylist
-est volontairement large (insensible à la casse) : en cas de doute, on bloque.
+Deux niveaux d'application du périmètre, pour éviter de confondre une cible de
+connexion avec un argument d'identité (-d corp.local), un débit (--rate 100000)
+ou un fichier (-oN scan.txt) :
+
+- `scope_literal_violations(gabarit)` — contrôle de RÉFÉRENCE du chemin offensif,
+  appelé sur le GABARIT (placeholders {target}/{domain}/{share} encore intacts,
+  jamais pris pour des hôtes). Chaque hôte LITTÉRAL (IP toutes notations pointées,
+  nom d'hôte, hôte d'URL/UNC) est passé par `assert_in_scope`, qui RÉSOUT les noms
+  (borné + caché, cf. scope.py). Fail-closed : hors périmètre / non résoluble /
+  sans périmètre ⇒ violation (l'opérateur peut ajouter la cible au périmètre).
+- `scope_violations(rendu)`/`evaluate` — backstop sur la commande RENDUE, limité
+  aux IP LITTÉRALES (aucun DNS, aucun faux positif) : les noms et les entiers nus
+  n'y sont pas contrôlés (ils le sont sur le gabarit).
+
+`shell_metachar`, `destructive_match`, `tokenize_argv`, `host_literals` et
+l'extraction/classification d'hôtes sont purs. La denylist est volontairement
+large (insensible à la casse) : en cas de doute, on bloque.
 """
 
 import ipaddress
 import re
 import shlex
+import socket
 from urllib.parse import urlparse
 
 from scope import ScopeError, assert_in_scope
@@ -125,57 +133,100 @@ def _host_candidates(rendered: str) -> list[str]:
     return out
 
 
-def _host_kind(cand: str) -> str | None:
-    """Classe un candidat : 'ip' (littérale valide v4/v6), 'bad_ipv4' (quad pointé
-    invalide → violation locale sans DNS), 'decimal_ip' (entier > 65535, évasion
-    décimale), 'hostname' (FQDN hors extensions de fichier), ou None (à ignorer).
-    Pur (aucune résolution)."""
+def _normalize_ipv4_any(cand: str) -> str | None:
+    """IPv4 pointée normalisée si `cand` est une forme acceptée par inet_aton
+    (décimale/octale/hexadécimale pointée, comme nmap/curl), sinon None. Pur."""
     try:
-        ipaddress.ip_address(cand)
-        return "ip"
+        return socket.inet_ntoa(socket.inet_aton(cand))
+    except (OSError, UnicodeError, TypeError):
+        return None
+
+
+def _host_kind(cand: str) -> str | None:
+    """Classe un candidat — formes NON ambiguës uniquement :
+    'ip6' (IPv6 littérale), 'ip4' (quad POINTÉ valide, octal/hex inclus via
+    inet_aton), 'bad_ipv4' (quad pointé invalide → violation locale sans DNS),
+    'hostname' (FQDN hors extensions de fichier), sinon None. Pur.
+
+    Un entier/hex/octal NU (sans point) renvoie None : indissociable d'une valeur
+    numérique de CLI (débit, taille) par la seule valeur → non traité en hôte
+    (résiduel assumé : une IP encodée en un seul entier nu n'est pas captée). La
+    cible sanctionnée {target}, elle, est in-scope par construction."""
+    try:
+        if ipaddress.ip_address(cand).version == 6:
+            return "ip6"
     except ValueError:
         pass
-    if _IPV4.fullmatch(cand):
-        return "bad_ipv4"
-    if cand.isdigit():
-        n = int(cand)
-        return "decimal_ip" if 65535 < n <= 0xFFFFFFFF else None
-    if _FQDN_RE.match(cand):
-        return None if cand.rsplit(".", 1)[-1].lower() in _NON_HOST_SUFFIXES else "hostname"
+    if "." in cand:                                   # IPv4 : formes POINTÉES seulement
+        if len(cand.split(".")) == 4 and _normalize_ipv4_any(cand) is not None:
+            return "ip4"
+        if _IPV4.fullmatch(cand):                     # 4 décimaux mais invalide (ex. 256.0.0.1)
+            return "bad_ipv4"
+        if _FQDN_RE.match(cand):
+            return None if cand.rsplit(".", 1)[-1].lower() in _NON_HOST_SUFFIXES else "hostname"
     return None
 
 
 def host_literals(text: str) -> list[str]:
-    """Hôtes/IP LITTÉRAUX d'une commande/gabarit (les placeholders `{…}` ne sont
-    pas des hôtes). Pur, SANS résolution : sert à l'authoring (un gabarit
-    réutilisable ne doit porter aucun littéral, seulement `{target}`)."""
-    return [c for c in _host_candidates(text) if _host_kind(c) is not None]
+    """Hôtes/IP LITTÉRAUX d'un gabarit/commande (dédoublonnés, ordre conservé) :
+    IP pointées, noms d'hôte, hôtes d'URL/UNC. Les placeholders `{…}` et les
+    entiers nus n'en sont PAS. Pur, SANS résolution : sert à l'authoring et au
+    contrôle de périmètre sur le gabarit."""
+    out: list[str] = []
+    for cand in _host_candidates(text):
+        if cand not in out and _host_kind(cand) is not None:
+            out.append(cand)
+    return out
 
 
 def scope_violations(rendered: str) -> list[str]:
-    """Hôtes/IP de la commande HORS périmètre (dédoublonnés, ordre conservé).
-
-    Applique le périmètre par RÉSOLUTION sur le chemin d'exécution : chaque token
-    en forme d'hôte est passé par `assert_in_scope` (qui résout les noms, de façon
-    bornée et mise en cache). Un nom hors périmètre OU non résoluble est une
-    violation (fail-closed). Cas particuliers sans DNS : un quad pointé invalide
-    (256.0.0.1) est signalé localement ; un entier <= 65535 (port) et un nom de
-    fichier (extension connue) ne sont pas traités comme des hôtes. L'évasion
-    décimale (ex. 167772169 = 10.0.0.9) est normalisée puis contrôlée sans DNS.
+    """Backstop sur la commande RENDUE : IP LITTÉRALES hors périmètre (sans DNS,
+    sans faux positif). Ne contrôle QUE les IP pointées (v4 toutes bases via
+    inet_aton, v6, quad invalide) — jamais un nom d'hôte ni un entier nu, pour ne
+    pas sur-bloquer un argument d'identité (-d corp.local) ou un débit
+    (--rate 100000). Les noms d'hôte littéraux sont contrôlés, avec résolution,
+    sur le gabarit via `scope_literal_violations`.
     """
     out: list[str] = []
     for cand in _host_candidates(rendered):
         if cand in out:
             continue
         kind = _host_kind(cand)
-        if kind is None:
+        if kind not in ("ip4", "ip6", "bad_ipv4"):    # noms/entiers nus : pas ici (cf. docstring)
             continue
         if kind == "bad_ipv4":
-            out.append(cand)              # quad pointé invalide : violation locale, jamais de DNS
+            out.append(cand)                           # quad invalide : violation locale, jamais de DNS
             continue
-        target = str(ipaddress.ip_address(int(cand))) if kind == "decimal_ip" else cand
+        target = _normalize_ipv4_any(cand) if kind == "ip4" else cand
         try:
-            assert_in_scope(target)       # 'ip'/'decimal_ip' : littéral (sans DNS) ; 'hostname' : résout
+            assert_in_scope(target)                    # IP littérale : aucun DNS
+        except ScopeError:
+            out.append(cand)
+    return out
+
+
+def scope_literal_violations(text: str) -> list[str]:
+    """Hôtes/IP LITTÉRAUX du gabarit HORS périmètre (dédoublonnés, ordre conservé).
+
+    Contrôle de périmètre de référence du chemin offensif. Opère sur le GABARIT
+    (placeholders {target}/{domain}/{share} intacts → jamais confondus avec des
+    hôtes). Chaque littéral — IP (notations pointées) OU nom d'hôte OU hôte
+    d'URL/UNC — passe par `assert_in_scope`, qui RÉSOUT les noms (borné + caché).
+    Hors périmètre, non résoluble, ou sans périmètre actif ⇒ violation
+    (fail-closed) : l'opérateur peut alors ajouter la cible au périmètre.
+    {target} (cible sanctionnée) reste in-scope par construction.
+    """
+    out: list[str] = []
+    for cand in host_literals(text):
+        if cand in out:
+            continue
+        kind = _host_kind(cand)
+        if kind == "bad_ipv4":
+            out.append(cand)
+            continue
+        target = _normalize_ipv4_any(cand) if kind == "ip4" else cand
+        try:
+            assert_in_scope(target)                    # 'ip4' : sans DNS ; 'hostname' : résout
         except ScopeError:
             out.append(cand)
     return out
