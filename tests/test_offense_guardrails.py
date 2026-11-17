@@ -167,3 +167,52 @@ def test_scope_literal_violations_ignores_placeholders_and_rate(monkeypatch):
     monkeypatch.setattr(__import__("scope").socket, "gethostbyname",
                         lambda n: (_ for _ in ()).throw(AssertionError(f"résolution inattendue : {n}")))
     assert g.scope_literal_violations("cme smb {target} -u {user} -d {domain} --rate 100000") == []
+
+
+# --- B1 : fermeture des trois contournements de classification d'hôte (notations exotiques) ---
+# Chaque notation était ignorée par la classification locale alors que l'OS (et donc l'outil
+# réel : nmap/nc/curl) la résout. Le périmètre doit donc la voir. Cf. revue adversariale 17/11.
+
+def test_scope_literal_violations_flags_trailing_dot_fqdn(monkeypatch):
+    # #1 : un FQDN avec point final (racine DNS, evil.example.com.) EST un hôte — nc/curl
+    # le résolvent. Il doit être résolu et contrôlé comme n'importe quel nom.
+    set_active_scope(Scope.from_lines(["10.0.0.0/24"]))
+    _fake_dns(monkeypatch, {"evil.example.com.": "203.0.113.9"})
+    assert g.scope_literal_violations("nmap -sV {target} evil.example.com.") == ["evil.example.com."]
+
+
+def test_scope_flags_abbreviated_ipv4_literal(monkeypatch):
+    # #2 : IPv4 abrégée — 8.524296 == 8.8.0.8 via inet_aton, acceptée telle quelle par
+    # nc/nmap/curl — hors périmètre. Contrôlée SANS DNS (forme IP) sur le gabarit ET le
+    # backstop rendu.
+    set_active_scope(Scope.from_lines(["10.0.0.0/24"]))
+    def boom(name):
+        raise AssertionError(f"DNS interdit sur une IP littérale : {name}")
+    monkeypatch.setattr(__import__("scope").socket, "gethostbyname", boom)
+    assert g.scope_literal_violations("nc 8.524296 4444") == ["8.524296"]
+    assert g.scope_violations("nc 8.524296 4444") == ["8.524296"]
+
+
+def test_scope_flags_integer_host_in_url(monkeypatch):
+    # #3 : entier encodant une IP en POSITION D'HÔTE d'URL — http://2130706433/ == 127.0.0.1,
+    # hors périmètre. Une position d'hôte structurée est un hôte non ambigu → contrôlée
+    # même en entier nu, et SANS DNS (forme IP).
+    set_active_scope(Scope.from_lines(["10.0.0.0/24"]))
+    def boom(name):
+        raise AssertionError(f"DNS interdit sur une IP littérale : {name}")
+    monkeypatch.setattr(__import__("scope").socket, "gethostbyname", boom)
+    assert g.scope_literal_violations("curl http://2130706433/") == ["2130706433"]
+    assert g.scope_violations("curl http://2130706433/") == ["2130706433"]
+
+
+def test_bare_integer_argument_still_not_a_host(monkeypatch):
+    # Non-régression FP : un entier NU HORS position d'hôte (débit, compte, port) n'est PAS
+    # une IP, même si inet_aton l'accepterait (100000 == 0.1.134.160). Pas de sur-blocage,
+    # et jamais de DNS. C'est l'exact contre-exemple de #3 : seule la POSITION diffère.
+    set_active_scope(Scope.from_lines(["10.0.0.0/24"]))
+    def boom(name):
+        raise AssertionError(f"DNS interdit : {name}")
+    monkeypatch.setattr(__import__("scope").socket, "gethostbyname", boom)
+    assert g.scope_literal_violations("masscan 10.0.0.5 --rate 100000") == []
+    assert g.scope_violations("masscan 10.0.0.5 --rate 100000") == []
+    assert g.host_literals("masscan 10.0.0.5 --rate 100000") == ["10.0.0.5"]

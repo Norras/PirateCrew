@@ -6,13 +6,21 @@ ou un fichier (-oN scan.txt) :
 
 - `scope_literal_violations(gabarit)` — contrôle de RÉFÉRENCE du chemin offensif,
   appelé sur le GABARIT (placeholders {target}/{domain}/{share} encore intacts,
-  jamais pris pour des hôtes). Chaque hôte LITTÉRAL (IP toutes notations pointées,
-  nom d'hôte, hôte d'URL/UNC) est passé par `assert_in_scope`, qui RÉSOUT les noms
-  (borné + caché, cf. scope.py). Fail-closed : hors périmètre / non résoluble /
-  sans périmètre ⇒ violation (l'opérateur peut ajouter la cible au périmètre).
-- `scope_violations(rendu)`/`evaluate` — backstop sur la commande RENDUE, limité
-  aux IP LITTÉRALES (aucun DNS, aucun faux positif) : les noms et les entiers nus
-  n'y sont pas contrôlés (ils le sont sur le gabarit).
+  jamais pris pour des hôtes). Chaque hôte LITTÉRAL (IP toutes notations — pointées
+  toutes bases, abrégées type 8.524296, et entier nu en position d'hôte d'URL/UNC —,
+  nom d'hôte y compris point final, hôte d'URL/UNC) est passé par `assert_in_scope`,
+  qui RÉSOUT les noms (borné + caché, cf. scope.py). Fail-closed : hors périmètre /
+  non résoluble / sans périmètre ⇒ violation (l'opérateur ajoute la cible au périmètre).
+- `scope_violations(rendu)`/`evaluate` — backstop sur la commande RENDUE, limité aux
+  IP LITTÉRALES (aucun DNS, aucun faux positif), notations abrégées comprises. Les
+  NOMS d'hôte n'y sont pas résolus (ils le sont sur le gabarit) ; un entier nu n'est
+  traité en IP que s'il est en POSITION D'HÔTE (URL/UNC/user@), jamais un entier
+  d'argument (--rate 100000).
+
+La classification d'hôte reste un filtre best-effort : la notation est déléguée à
+l'OS (inet_aton / résolveur), non réimplémentée, mais distinguer un entier nu
+d'argument d'une IP encodée reste indécidable hors position d'hôte — frontière
+assumée, la borne réelle étant la résolution déterministe + la contrainte {target}.
 
 `shell_metachar`, `destructive_match`, `tokenize_argv`, `host_literals` et
 l'extraction/classification d'hôtes sont purs. La denylist est volontairement
@@ -62,9 +70,10 @@ DENYLIST: list[tuple[re.Pattern, str]] = [
 _IPV4 = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
 
 # Un token « ressemble à un FQDN » : au moins un point, labels alphanumériques
-# (+ tiret), dernier label commençant par une lettre. Exclut les versions
-# (2.2.15) et les IP pointées (dernier label numérique).
-_FQDN_RE = re.compile(r"^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,62})\.)+[A-Za-z][A-Za-z0-9-]{0,62}$")
+# (+ tiret), dernier label commençant par une lettre, point final (racine DNS)
+# optionnel (evil.example.com. est un hôte, résolu par nc/curl). Exclut les
+# IP pointées (dernier label numérique → non capté ici, traité en IPv4).
+_FQDN_RE = re.compile(r"^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,62})\.)+[A-Za-z][A-Za-z0-9-]{0,62}\.?$")
 
 # Extensions de fichier courantes : un token en forme de FQDN mais finissant par
 # l'une d'elles est traité comme un NOM DE FICHIER (donnée), pas un hôte à
@@ -95,41 +104,61 @@ def destructive_match(rendered: str) -> str | None:
     return None
 
 
-def _host_from_token(tok: str) -> str | None:
-    """Extrait l'hôte d'un token argv : URL (http://h:port/p), UNC (//h/s),
-    user@h, [ipv6], h:port, sinon le token nettoyé d'un chemin. None si rien
-    d'exploitable. Pur (aucune résolution)."""
+def _host_from_token(tok: str) -> tuple[str, bool] | None:
+    """Extrait `(hôte, structuré)` d'un token argv. None si rien d'exploitable. Pur.
+
+    `structuré` vaut True quand l'hôte provient d'une POSITION D'HÔTE non ambiguë —
+    URL (http://h:port/p), UNC (//h/s), user@h, [ipv6] : ce qui s'y trouve EST un
+    hôte, même encodé en entier nu (http://2130706433/). Un token nu (structuré=False :
+    h:port ou le token nettoyé d'un chemin) n'est traité en hôte que s'il en a la
+    FORME (cf. `_host_kind`), pour ne pas prendre un entier d'argument (--rate 100000)
+    pour une IP."""
     t = (tok or "").strip().strip("\"'")
     if not t:
         return None
     if "://" in t:                                   # URL
         try:
-            return urlparse(t).hostname or None
+            h = urlparse(t).hostname
         except ValueError:
             return None
+        return (h, True) if h else None
     if t.startswith("//") or t.startswith("\\\\"):   # UNC //host/share
-        return re.split(r"[/\\]", t.lstrip("/\\"), maxsplit=1)[0] or None
+        h = re.split(r"[/\\]", t.lstrip("/\\"), maxsplit=1)[0]
+        return (h, True) if h else None
+    structured = False
     if "@" in t:                                     # user:pass@host
         t = t.rsplit("@", 1)[1]
+        structured = True
     if t.startswith("[") and "]" in t:               # [ipv6] ou [ipv6]:port
-        return t[1:t.index("]")] or None
+        h = t[1:t.index("]")]
+        return (h, True) if h else None
     t = re.split(r"[/\\]", t, maxsplit=1)[0]         # retire un chemin éventuel
     if t.count(":") == 1:                            # host:port (IPv6 a >= 2 ':')
         t = t.split(":", 1)[0]
-    return t or None
+    return (t, structured) if t else None
 
 
-def _host_candidates(rendered: str) -> list[str]:
-    """Hôtes/IP candidats d'une commande rendue (ordre conservé, dédoublonnés). Pur."""
+def _host_candidates(rendered: str) -> list[tuple[str, bool]]:
+    """Candidats `(hôte, structuré)` d'une commande rendue (ordre conservé,
+    dédoublonnés par hôte). Si un même hôte apparaît en position nue ET structurée,
+    le flag structuré l'emporte. Pur."""
     try:
         tokens = shlex.split(rendered or "", posix=True)
     except ValueError:
         tokens = (rendered or "").split()
-    out: list[str] = []
+    out: list[tuple[str, bool]] = []
+    pos: dict[str, int] = {}
     for tok in tokens:
-        host = _host_from_token(tok)
-        if host and host not in out:
-            out.append(host)
+        res = _host_from_token(tok)
+        if res is None:
+            continue
+        host, structured = res
+        if host in pos:
+            i = pos[host]
+            out[i] = (host, out[i][1] or structured)
+        else:
+            pos[host] = len(out)
+            out.append((host, structured))
     return out
 
 
@@ -142,28 +171,35 @@ def _normalize_ipv4_any(cand: str) -> str | None:
         return None
 
 
-def _host_kind(cand: str) -> str | None:
+def _host_kind(cand: str, structured: bool = False) -> str | None:
     """Classe un candidat — formes NON ambiguës uniquement :
-    'ip6' (IPv6 littérale), 'ip4' (quad POINTÉ valide, octal/hex inclus via
-    inet_aton), 'bad_ipv4' (quad pointé invalide → violation locale sans DNS),
-    'hostname' (FQDN hors extensions de fichier), sinon None. Pur.
+    'ip6' (IPv6 littérale), 'ip4' (IPv4 toutes bases via inet_aton — décimal, octal,
+    hex — formes abrégées comprises : 8.524296, 127.1), 'bad_ipv4' (quad décimal
+    pointé invalide → violation locale sans DNS), 'hostname' (FQDN, point final
+    optionnel, hors extensions de fichier), sinon None. Pur.
 
-    Un entier/hex/octal NU (sans point) renvoie None : indissociable d'une valeur
-    numérique de CLI (débit, taille) par la seule valeur → non traité en hôte
-    (résiduel assumé : une IP encodée en un seul entier nu n'est pas captée). La
-    cible sanctionnée {target}, elle, est in-scope par construction."""
+    `structured`=True (hôte issu d'une position d'URL/UNC/user@/[ipv6]) accepte comme
+    'ip4' un entier nu encodant une IP (http://2130706433/ == 127.0.0.1) : en position
+    d'hôte, un entier EST l'hôte. Hors de là, un entier NU (sans point) renvoie None,
+    indissociable d'une valeur numérique de CLI (débit, taille) — résiduel assumé :
+    une IP encodée en un seul entier nu HORS position d'hôte n'est pas captée ; la
+    cible sanctionnée {target} est in-scope par construction."""
     try:
         if ipaddress.ip_address(cand).version == 6:
             return "ip6"
     except ValueError:
         pass
-    if "." in cand:                                   # IPv4 : formes POINTÉES seulement
-        if len(cand.split(".")) == 4 and _normalize_ipv4_any(cand) is not None:
-            return "ip4"
+    # IPv4 toutes bases (inet_aton). On exige un point sur un token NU — sinon un
+    # entier nu (--rate 100000 == 0.1.134.160) serait pris pour une IP ; en position
+    # d'hôte STRUCTURÉE l'entier encodé est bien l'hôte, donc accepté sans point.
+    if ("." in cand or structured) and _normalize_ipv4_any(cand) is not None:
+        return "ip4"
+    if "." in cand:
         if _IPV4.fullmatch(cand):                     # 4 décimaux mais invalide (ex. 256.0.0.1)
             return "bad_ipv4"
         if _FQDN_RE.match(cand):
-            return None if cand.rsplit(".", 1)[-1].lower() in _NON_HOST_SUFFIXES else "hostname"
+            suffix = cand.rstrip(".").rsplit(".", 1)[-1].lower()  # point final ignoré
+            return None if suffix in _NON_HOST_SUFFIXES else "hostname"
     return None
 
 
@@ -173,25 +209,25 @@ def host_literals(text: str) -> list[str]:
     entiers nus n'en sont PAS. Pur, SANS résolution : sert à l'authoring et au
     contrôle de périmètre sur le gabarit."""
     out: list[str] = []
-    for cand in _host_candidates(text):
-        if cand not in out and _host_kind(cand) is not None:
+    for cand, structured in _host_candidates(text):
+        if cand not in out and _host_kind(cand, structured) is not None:
             out.append(cand)
     return out
 
 
 def scope_violations(rendered: str) -> list[str]:
     """Backstop sur la commande RENDUE : IP LITTÉRALES hors périmètre (sans DNS,
-    sans faux positif). Ne contrôle QUE les IP pointées (v4 toutes bases via
-    inet_aton, v6, quad invalide) — jamais un nom d'hôte ni un entier nu, pour ne
-    pas sur-bloquer un argument d'identité (-d corp.local) ou un débit
-    (--rate 100000). Les noms d'hôte littéraux sont contrôlés, avec résolution,
-    sur le gabarit via `scope_literal_violations`.
+    sans faux positif). Ne contrôle QUE les IP (v4 toutes bases via inet_aton,
+    formes abrégées comprises ; v6 ; quad décimal invalide) et l'entier encodant
+    une IP en POSITION D'HÔTE (URL/UNC/user@) — jamais un nom d'hôte (résolu sur le
+    gabarit via `scope_literal_violations`) ni un entier nu d'argument, pour ne pas
+    sur-bloquer un argument d'identité (-d corp.local) ou un débit (--rate 100000).
     """
     out: list[str] = []
-    for cand in _host_candidates(rendered):
+    for cand, structured in _host_candidates(rendered):
         if cand in out:
             continue
-        kind = _host_kind(cand)
+        kind = _host_kind(cand, structured)
         if kind not in ("ip4", "ip6", "bad_ipv4"):    # noms/entiers nus : pas ici (cf. docstring)
             continue
         if kind == "bad_ipv4":
@@ -217,10 +253,12 @@ def scope_literal_violations(text: str) -> list[str]:
     {target} (cible sanctionnée) reste in-scope par construction.
     """
     out: list[str] = []
-    for cand in host_literals(text):
+    for cand, structured in _host_candidates(text):
         if cand in out:
             continue
-        kind = _host_kind(cand)
+        kind = _host_kind(cand, structured)
+        if kind is None:                               # placeholder, entier nu hors hôte, fichier
+            continue
         if kind == "bad_ipv4":
             out.append(cand)
             continue
