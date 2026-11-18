@@ -1011,6 +1011,12 @@ def node_execute(state: MissionState, config):
         reports.append({"technique": tech.id, "host": task["host"], "service": task["service"],
                         "port": port, "inputs_fp": inputs_fp, "status": status, "detail": raw,
                         "tool_output": tool_output})
+    # Trace d'audit de l'exécution (toute technique passée par ce nœud, quel que soit
+    # son issue). Champs structurels SEULEMENT — jamais la commande rendue, qui porte
+    # le credential (elle reste dans world.json, cf. README § secrets au repos).
+    for r in reports:
+        _audit_event("EXEC", f"{r.get('technique', '?')} {r.get('host', '?')}:{r.get('port', 0)}"
+                     f"/{r.get('service', '?')} -> {r.get('status', '?')}")
     return {"execution_reports": reports}
 
 

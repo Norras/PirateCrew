@@ -126,6 +126,53 @@ def test_http_get_returns_body(tmp_path, monkeypatch):
     assert "creds.txt" in out                # le CORPS est renvoyé, pas juste les en-têtes
 
 
+def test_http_get_decodes_utf16(tmp_path, monkeypatch):
+    import tools.registry as reg
+    monkeypatch.setattr(reg, "AUDIT_LOG", str(tmp_path / "audit.log"))
+    monkeypatch.setattr(reg, "_validate_target", lambda t: "127.0.0.1")
+    # Corps UTF-16 LE avec BOM (ex. export Windows/PowerShell).
+    payload = "mot_de_passe=Clé-Été-2026".encode("utf-16")
+
+    class FakeResp:
+        status, reason = 200, "OK"
+        def read(self, n=-1): return payload
+
+    class FakeConn:
+        def __init__(self, host, port, timeout=None): pass
+        def request(self, method, path, headers=None): pass
+        def getresponse(self): return FakeResp()
+        def close(self): pass
+
+    monkeypatch.setattr(reg.http.client, "HTTPConnection", FakeConn)
+    from tools.registry import http_get
+    out = http_get.invoke({"url": "http://box.htb/conf"})
+    assert "mot_de_passe=Clé-Été-2026" in out   # décodé correctement
+    assert "�" not in out                   # pas de caractère de remplacement
+    assert "\x00" not in out                     # pas d'octets nuls de l'UTF-16
+
+
+def test_http_get_utf8_still_ok(tmp_path, monkeypatch):
+    import tools.registry as reg
+    monkeypatch.setattr(reg, "AUDIT_LOG", str(tmp_path / "audit.log"))
+    monkeypatch.setattr(reg, "_validate_target", lambda t: "127.0.0.1")
+    payload = "contenu accentué: café".encode("utf-8")
+
+    class FakeResp:
+        status, reason = 200, "OK"
+        def read(self, n=-1): return payload
+
+    class FakeConn:
+        def __init__(self, host, port, timeout=None): pass
+        def request(self, method, path, headers=None): pass
+        def getresponse(self): return FakeResp()
+        def close(self): pass
+
+    monkeypatch.setattr(reg.http.client, "HTTPConnection", FakeConn)
+    from tools.registry import http_get
+    out = http_get.invoke({"url": "http://box.htb/"})
+    assert "contenu accentué: café" in out       # non-régression UTF-8
+
+
 def test_smb_list_shares_builds_argv(monkeypatch, local_scope):
     from scope import set_active_scope
     set_active_scope(local_scope)
