@@ -47,3 +47,135 @@ def test_setup_orders_and_disables_v6():
 def test_teardown():
     assert netns.teardown_commands() == [["ip", "netns", "del", "pc-offense"],
                                          ["nft", "delete", "table", "inet", "piratecrew"]]
+
+
+# --------------------------------------------------------------------------- #
+# Task 2 : mise en place root (run / write injectés)
+# --------------------------------------------------------------------------- #
+class _Proc:
+    def __init__(self, returncode=0, stdout="", stderr=""):
+        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+
+
+class _FakeRun:
+    """Remplace subprocess.run : enregistre (argv, input), ne lance rien."""
+
+    def __init__(self, fail_on=None, stdout="", returncode=0):
+        self.calls = []
+        self.fail_on = fail_on          # préfixe d'argv qui échoue (returncode=1)
+        self.stdout, self.returncode = stdout, returncode
+
+    def __call__(self, argv, input=None, **kwargs):
+        self.calls.append((list(argv), input))
+        if self.fail_on and list(argv)[:len(self.fail_on)] == self.fail_on:
+            return _Proc(1, "", "boom")
+        return _Proc(self.returncode, self.stdout, "")
+
+
+class _FakeWrite:
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, path, content, mode):
+        self.calls.append((path, content, mode))
+
+
+@pytest.fixture
+def fake_run():
+    return _FakeRun()
+
+
+@pytest.fixture
+def fake_write():
+    return _FakeWrite()
+
+
+def test_up_loads_nft_before_creating_namespace(fake_run, fake_write):
+    s = Scope.from_lines(["10.0.0.0/24"])
+    netns.up(s, run=fake_run, write=fake_write)
+    argvs = [c[0] for c in fake_run.calls]
+    assert argvs.index(["nft", "-f", "-"]) < argvs.index(["ip", "netns", "add", "pc-offense"])
+    assert fake_run.calls[argvs.index(["nft", "-f", "-"])][1] == netns.nft_ruleset(netns.scope_v4(s))
+
+
+def test_up_is_idempotent_teardown_first(fake_run, fake_write):
+    netns.up(Scope.from_lines(["10.0.0.0/24"]), run=fake_run, write=fake_write)
+    assert [c[0] for c in fake_run.calls][:2] == netns.teardown_commands()
+
+
+def test_up_survives_failing_initial_teardown(fake_write):
+    # Premier `up` : il n'y a rien à démonter, `ip netns del` échoue — ce n'est pas une erreur.
+    run = _FakeRun(fail_on=["ip", "netns", "del"])
+    netns.up(Scope.from_lines(["10.0.0.0/24"]), run=run, write=fake_write)
+    assert ["ip", "netns", "add", "pc-offense"] in [c[0] for c in run.calls]
+
+
+def test_up_writes_helper_resolv_and_sudoers(fake_run, fake_write):
+    netns.up(Scope.from_lines(["10.0.0.0/24"]), dns="10.0.0.2", sudo_user="kali",
+             run=fake_run, write=fake_write)
+    files = {p: (c, m) for p, c, m in fake_write.calls}
+    assert files["/usr/local/sbin/pc-netns-exec"] == (netns.HELPER_SCRIPT, 0o755)
+    assert files["/etc/netns/pc-offense/resolv.conf"] == ("nameserver 10.0.0.2\n", 0o644)
+    assert files["/etc/sudoers.d/piratecrew"] == (
+        "kali ALL=(root) NOPASSWD: /usr/local/sbin/pc-netns-exec\n", 0o440)
+    assert fake_run.calls[-1][0] == ["visudo", "-cf", "/etc/sudoers.d/piratecrew"]
+
+
+def test_up_without_sudo_user_writes_no_sudoers(fake_run, fake_write):
+    netns.up(Scope.from_lines(["10.0.0.0/24"]), run=fake_run, write=fake_write)
+    assert "/etc/sudoers.d/piratecrew" not in [p for p, _c, _m in fake_write.calls]
+    assert ["visudo", "-cf", "/etc/sudoers.d/piratecrew"] not in [c[0] for c in fake_run.calls]
+
+
+def test_up_default_dns_is_empty_resolv(fake_run, fake_write):
+    netns.up(Scope.from_lines(["10.0.0.0/24"]), run=fake_run, write=fake_write)
+    assert ("/etc/netns/pc-offense/resolv.conf", "", 0o644) in fake_write.calls
+
+
+def test_up_refuses_out_of_scope_dns_and_bad_sudo_user(fake_run, fake_write):
+    s = Scope.from_lines(["10.0.0.0/24"])
+    with pytest.raises(netns.NetnsError):
+        netns.up(s, dns="8.8.8.8", run=fake_run, write=fake_write)
+    with pytest.raises(netns.NetnsError):
+        netns.up(s, dns="dc01.corp.local", run=fake_run, write=fake_write)   # IP littérale exigée
+    with pytest.raises(netns.NetnsError):
+        netns.up(s, sudo_user="kali ALL=(ALL) ALL\nroot", run=fake_run, write=fake_write)
+    assert fake_run.calls == [] and fake_write.calls == []
+
+
+def test_up_refuses_scope_without_ipv4_before_any_command(fake_run, fake_write):
+    with pytest.raises(netns.NetnsError):
+        netns.up(Scope.from_lines(["fd00::/8"]), run=fake_run, write=fake_write)
+    assert fake_run.calls == [] and fake_write.calls == []
+
+
+def test_up_failure_tears_down(fake_write):
+    run = _FakeRun(fail_on=["ip", "link", "add"])
+    with pytest.raises(netns.NetnsError, match="ip link add"):
+        netns.up(Scope.from_lines(["10.0.0.0/24"]), run=run, write=fake_write)
+    assert [c[0] for c in run.calls][-2:] == netns.teardown_commands()
+    assert fake_write.calls == []
+
+
+def test_up_nft_load_failure_creates_no_namespace(fake_write):
+    run = _FakeRun(fail_on=["nft", "-f"])
+    with pytest.raises(netns.NetnsError):
+        netns.up(Scope.from_lines(["10.0.0.0/24"]), run=run, write=fake_write)
+    assert ["ip", "netns", "add", "pc-offense"] not in [c[0] for c in run.calls]
+
+
+def test_down_never_raises():
+    def boom(argv, **kwargs):
+        raise FileNotFoundError("ip")
+    netns.down(run=boom)                       # binaire absent : ne lève pas
+    run = _FakeRun(fail_on=["ip"])
+    netns.down(run=run)
+    assert [c[0] for c in run.calls] == netns.teardown_commands()
+
+
+def test_main_requires_root_and_linux(monkeypatch):
+    monkeypatch.setattr(netns.sys, "platform", "win32")
+    assert netns.main(["up"]) == 2
+    monkeypatch.setattr(netns.sys, "platform", "linux")
+    monkeypatch.setattr(netns.os, "geteuid", lambda: 1000, raising=False)
+    assert netns.main(["up"]) == 2
