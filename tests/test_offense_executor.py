@@ -29,3 +29,34 @@ def test_guardrail_block_short_circuits_runner():
 
 def test_empty_command_is_error():
     assert ex.execute_command("")[0] == "error"
+
+
+def test_default_runner_is_netns_and_blocks_when_unavailable(monkeypatch):
+    # Sans runner injecté, l'exécution passe par le namespace réseau ; s'il n'est
+    # pas en place, rien ne tourne (fail-closed) et le statut le dit.
+    import offense.netns as netns
+    set_active_scope(Scope.from_lines(["127.0.0.1/32"]))
+
+    def boom(argv, timeout=120):
+        raise netns.NetnsError("namespace absent")
+    monkeypatch.setattr(netns, "run_isolated", boom)
+    status, out = ex.execute_command("nmap 127.0.0.1")
+    assert status == "blocked_no_netns" and "namespace absent" in out
+
+
+def test_default_runner_passes_argv_to_netns(monkeypatch):
+    import offense.netns as netns
+    set_active_scope(Scope.from_lines(["127.0.0.1/32"]))
+    monkeypatch.setattr(netns, "run_isolated", lambda argv, timeout=120: f"{argv}|{timeout}")
+    assert ex.execute_command("nmap 127.0.0.1", timeout=9) == ("done", "['nmap', '127.0.0.1']|9")
+
+
+def test_default_runner_never_reaches_plain_subprocess(monkeypatch):
+    # Le chemin par défaut ne doit JAMAIS retomber sur tools.registry._run nu
+    # (sans namespace) : avec un périmètre réseau indisponible, _run n'est pas appelé.
+    import tools.registry as reg
+    set_active_scope(Scope.from_lines(["127.0.0.1/32"]))
+    ran = []
+    monkeypatch.setattr(reg, "_run", lambda argv, timeout=120: ran.append(argv) or "exécuté")
+    status, _out = ex.execute_command("nmap 127.0.0.1")
+    assert status == "blocked_no_netns" and ran == []

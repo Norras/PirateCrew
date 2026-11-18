@@ -556,3 +556,86 @@ def test_node_integrate_marks_missing_input_tried(monkeypatch, tmp_path):
                 "inputs_fp": "", "status": "blocked_missing_input", "detail": "manque {share}"}]
     orch.node_integrate({"planned": [], "execution_reports": reports, "cycle": 0}, cfg)
     assert wm.is_tried("127.0.0.1", "smb", "llm.share", inputs_fp="", port=445) is True
+
+
+def test_blocked_no_netns_escalates_and_is_not_marked_tried(monkeypatch, tmp_path):
+    # Périmètre réseau absent : la technique n'est PAS grillée (replanifiable après
+    # `offense.netns up`), l'opérateur est prévenu, et le message d'erreur — qui cite
+    # des adresses — n'alimente pas le modèle du monde.
+    import orchestrator as orch
+    from state import mission_io
+    monkeypatch.setattr(mission_io, "MISSIONS_ROOT", tmp_path)
+    wm = WorldModel(scope=Scope.from_lines(["10.0.0.0/24"]))
+    wm.add_service("10.0.0.5", 445, name="smb")
+    orch._MISSIONS["t_nn"] = wm
+    cfg = {"configurable": {"thread_id": "t_nn"}}
+    reports = [{"technique": "op.n", "host": "10.0.0.5", "service": "smb", "port": 445,
+                "inputs_fp": "", "status": "blocked_no_netns",
+                "detail": "Le périmètre réseau installé (10.0.0.77) ne correspond pas"}]
+    out = orch.node_integrate({"planned": [], "execution_reports": reports, "cycle": 0}, cfg)
+    assert wm.is_tried("10.0.0.5", "smb", "op.n", inputs_fp="", port=445) is False
+    assert out["netns_missing"] is True
+    assert "sudo python -m offense.netns up" in out["final_response"]
+    assert "10.0.0.77" not in wm.hosts
+
+
+def test_no_netns_through_node_execute_then_integrate(monkeypatch, tmp_path):
+    # Même contrat, de bout en bout : le statut de l'exécuteur traverse node_execute
+    # tel quel, et node_integrate ne grille pas la technique.
+    import orchestrator as orch
+    from state import mission_io
+    from catalog.loader import Technique
+    monkeypatch.setattr(mission_io, "MISSIONS_ROOT", tmp_path)
+    monkeypatch.setattr("offense.executor.execute_command",
+                        lambda rendered, **kw: ("blocked_no_netns", "namespace absent"))
+    tech = Technique(id="op.n", name="n", domain="network", service="smb", requires=set(),
+                     tool="nmap", command_template="nmap -sV {target}",
+                     success_signal="open", provided_by="operator")
+    monkeypatch.setattr(orch, "_CATALOG", [tech])
+    monkeypatch.setattr(orch, "technique_available", lambda t: True)
+    wm = WorldModel(scope=Scope.from_lines(["127.0.0.1/32"]))
+    wm.add_service("127.0.0.1", 445, name="smb")
+    orch._MISSIONS["t_nn3"] = wm
+    cfg = {"configurable": {"thread_id": "t_nn3"}}
+    planned = plan_tasks(wm, orch._CATALOG)
+    reports = orch.node_execute({"planned": planned, "rag_context": ""}, cfg)["execution_reports"]
+    assert [r["status"] for r in reports if r["technique"] == "op.n"] == ["blocked_no_netns"]
+    out = orch.node_integrate({"planned": planned, "execution_reports": reports, "cycle": 0}, cfg)
+    assert out["netns_missing"] is True
+    assert wm.is_tried("127.0.0.1", "smb", "op.n", inputs_fp="", port=445) is False
+    assert plan_tasks(wm, orch._CATALOG)          # toujours replanifiable après `up`
+
+
+def test_node_integrate_clears_netns_missing_when_nothing_blocked(monkeypatch, tmp_path):
+    import orchestrator as orch
+    from state import mission_io
+    monkeypatch.setattr(mission_io, "MISSIONS_ROOT", tmp_path)
+    wm = WorldModel(scope=Scope.from_lines(["10.0.0.0/24"]))
+    orch._MISSIONS["t_nn2"] = wm
+    out = orch.node_integrate({"planned": [], "execution_reports": [], "cycle": 0,
+                               "netns_missing": True}, {"configurable": {"thread_id": "t_nn2"}})
+    assert out["netns_missing"] is False
+
+
+def test_route_finishes_when_only_netns_blocked_tasks_remain(monkeypatch):
+    # Sans périmètre réseau, les techniques operator/llm ne sont pas exécutables :
+    # la boucle ne tourne pas à vide jusqu'au cap de cycles.
+    import orchestrator as orch
+    from catalog.loader import Technique
+    tech = Technique(id="op.n", name="n", domain="network", service="smb", requires=set(),
+                     tool="nmap", command_template="nmap -sV {target}",
+                     success_signal="open", provided_by="operator")
+    monkeypatch.setattr(orch, "_CATALOG", [tech])
+    monkeypatch.setattr(orch, "technique_available", lambda t: True)
+    wm = WorldModel(scope=Scope.from_lines(["127.0.0.1/32"]))
+    wm.add_service("127.0.0.1", 445, name="smb")
+    orch._MISSIONS["t_route_netns"] = wm
+    base = {"cycle": 1, "max_cycles": 6, "thread_id": "t_route_netns"}
+    assert route_after_integrate(base) == "continue"
+    assert route_after_integrate({**base, "netns_missing": True}) == "finish"
+
+
+def test_netns_missing_is_a_declared_state_channel():
+    # LangGraph n'accepte en sortie de nœud que les clés déclarées dans l'état.
+    import orchestrator as orch
+    assert "netns_missing" in orch.MissionState.__annotations__

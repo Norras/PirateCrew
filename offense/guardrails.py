@@ -1,5 +1,13 @@
 """Garde-fous offensifs : contrôles sur une commande.
 
+GEL (18/11/2026) — le contrôle TEXTE du périmètre ci-dessous est une défense en
+profondeur, plus la frontière. La frontière est `offense/netns.py` : les
+commandes s'exécutent dans un namespace réseau dont le noyau ne laisse sortir
+que les IP du périmètre, quelle que soit l'écriture de l'hôte. Ne plus ajouter
+ici de notation d'hôte : trois revues adverses ont montré que cette liste ne
+converge pas. Les contrôles non réseau (métacaractères shell, commandes
+destructrices) restent, eux, pleinement en vigueur.
+
 Deux niveaux d'application du périmètre, pour éviter de confondre une cible de
 connexion avec un argument d'identité (-d corp.local), un débit (--rate 100000)
 ou un fichier (-oN scan.txt) :

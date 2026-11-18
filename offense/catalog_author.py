@@ -83,10 +83,37 @@ def _materialized_host_literals(template: str) -> list[str]:
     return out
 
 
+_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def _well_typed(d: dict) -> bool:
+    """Types attendus des champs proposés par le LLM. Un champ mal typé (liste à
+    la place d'une chaîne, id non hachable ou en forme de chemin…) rend la
+    proposition inutilisable : elle est rejetée ici plutôt que de faire lever la
+    planification plus tard, à chaque cycle."""
+    if not isinstance(d.get("id"), str) or not _ID_RE.match(d["id"]):
+        return False
+    if not isinstance(d.get("command_template"), str) or not d["command_template"].strip():
+        return False
+    for key in ("name", "domain", "tool", "success_signal"):
+        if d.get(key) is not None and not isinstance(d[key], str):
+            return False
+    requires = d.get("requires") or []
+    if isinstance(requires, str):
+        requires = [requires]
+    if not isinstance(requires, list) or not all(isinstance(r, str) for r in requires):
+        return False
+    return isinstance(d.get("opens_session", False), bool)
+
+
 def author_technique(service: str, context: str, llm_invoke) -> Technique | None:
-    """Technique tagguée `llm` ou None si illisible / gabarit refusé."""
-    d = parse_technique(llm_invoke(build_author_prompt(service, context)))
-    if d is None:
+    """Technique tagguée `llm` ou None si illisible / mal typée / gabarit refusé.
+    Ne lève jamais : un appel LLM en échec ou une réponse inattendue vaut None."""
+    try:
+        d = parse_technique(llm_invoke(build_author_prompt(service, context)))
+    except Exception:  # noqa: BLE001 - API indisponible, réponse sans .content… : pas de proposition
+        return None
+    if d is None or not _well_typed(d):
         return None
     d["service"] = service
     d["provided_by"] = "llm"
@@ -186,51 +213,79 @@ def _flag_value_is_literal(template: str) -> bool:
     return False
 
 
-def promote_techniques_to_rag(techniques, mission_id: str, forbidden=(), store=None) -> int:
-    """Promeut les techniques rédigées par l'auteur LLM dans le RAG partagé.
+def _rag_candidate(t, forbidden) -> dict | None:
+    """Ce qui serait stocké pour `t` ({id, text, metadata}), ou None si le filtre
+    l'écarte. Peut lever sur une technique mal formée (géré par l'appelant)."""
+    reqs = ", ".join(sorted(t.requires)) if t.requires else "aucun"
+    text = (
+        f"Technique « {t.name} » pour le service {t.service} "
+        f"(outil {t.tool or '?'}). Commande : {t.command_template}. "
+        f"Signal de succès : {t.success_signal or '?'}. Prérequis : {reqs}. "
+        f"Ouvre une session : {t.opens_session}. Source : auteur LLM."
+    )
+    meta = {"source": "llm_authored", "service": t.service,
+            "technique_id": t.id, "tool": t.tool or ""}
+    # Scan de TOUT le contenu persisté (page_content + metadata), pas d'un
+    # sous-ensemble de champs.
+    scanned = text + " " + " ".join(str(v) for v in meta.values())
+    if _carries_target_data(scanned, forbidden) or _flag_value_is_literal(t.command_template):
+        return None  # spécifique à la mission → jamais dans le RAG partagé
+    digest = hashlib.sha1(
+        f"{t.service}|{t.command_template}".encode("utf-8")).hexdigest()[:16]
+    return {"id": f"llm:{digest}", "text": text, "metadata": meta}
 
-    Fail-closed, invariant code-enforcé : une technique n'est persistée QUE si
-    rien de ce qui serait écrit (page_content complet + metadata) ne porte de
-    donnée de cible. Est rejetée (skip) toute technique dont ce contenu contient
-    une IP littérale, un jeton à forte entropie (hash/clé/token, même inconnu),
-    ou une chaîne de `forbidden` (secrets/principals connus, insensible à la
-    casse) ; et toute technique dont le `command_template` met une valeur
-    LITTÉRALE après un flag de credential (-p/-H/-u/…) au lieu d'un {placeholder}.
-    `mission_id` est accepté mais volontairement ABSENT de la metadata (il
-    contient l'IP cible). Id stable = hash(service|gabarit) → upsert idempotent.
-    `store=None` → import paresseux du vectorstore. Renvoie le nombre promu.
 
-    Résiduel assumé (documenté) : un secret en position exotique — userinfo
-    d'URL (user:pass@h), en-tête (-H "Authorization: …"), argument positionnel,
-    ou valeur attachée (--password=…) — ou de moins de 3 caractères, n'est pas
-    systématiquement capté.
+def rag_candidates(techniques, forbidden=()) -> list[dict]:
+    """Candidats à la promotion RAG : `[{id, text, metadata}]`, exactement ce qui
+    serait écrit. N'écrit rien.
+
+    Filtre de PRÉ-TRI, pas une garantie : est écartée toute technique dont le
+    contenu porte une IP littérale, un jeton à forte entropie (hash/clé/token),
+    une chaîne de `forbidden` (secrets, principals, noms d'hôte connus —
+    insensible à la casse), ou une valeur LITTÉRALE après un flag de credential.
+    Il ne reconnaît PAS toute donnée de cible : nom ou identifiant vu dans une
+    sortie d'outil mais absent de `forbidden`, valeur de moins de 3 caractères,
+    forme encodée, valeur attachée (--user=…), userinfo d'URL, argument
+    positionnel. La garantie est l'accord de l'opérateur, qui relit ces textes
+    avant écriture (commande « promote » du REPL).
+
+    Une technique mal formée (champ non textuel…) est écartée seule, sans lever
+    ni faire perdre le lot ; deux techniques de même (service, gabarit) ne
+    donnent qu'un candidat (id stable = hash(service|gabarit) → upsert idempotent).
     """
-    if not techniques:
-        return 0
-    texts, metadatas, ids = [], [], []
-    for t in techniques:
-        reqs = ", ".join(sorted(t.requires)) if t.requires else "aucun"
-        text = (
-            f"Technique « {t.name} » pour le service {t.service} "
-            f"(outil {t.tool or '?'}). Commande : {t.command_template}. "
-            f"Signal de succès : {t.success_signal or '?'}. Prérequis : {reqs}. "
-            f"Ouvre une session : {t.opens_session}. Source : auteur LLM."
-        )
-        meta = {"source": "llm_authored", "service": t.service,
-                "technique_id": t.id, "tool": t.tool or ""}
-        # Scan de TOUT le contenu persisté (page_content + metadata), pas d'un
-        # sous-ensemble de champs : aucune donnée de cible ne doit s'y glisser.
-        scanned = text + " " + " ".join(str(v) for v in meta.values())
-        if _carries_target_data(scanned, forbidden) or _flag_value_is_literal(t.command_template):
-            continue  # spécifique à la mission → jamais dans le RAG partagé
-        texts.append(text)
-        metadatas.append(meta)
-        digest = hashlib.sha1(
-            f"{t.service}|{t.command_template}".encode("utf-8")).hexdigest()[:16]
-        ids.append(f"llm:{digest}")
-    if not texts:
+    forbidden = [f for f in forbidden if isinstance(f, str)]
+    out: list[dict] = []
+    seen: set[str] = set()
+    for t in techniques or []:
+        try:
+            cand = _rag_candidate(t, forbidden)
+        except Exception:  # noqa: BLE001 - fail-closed par technique : écartée, jamais écrite
+            cand = None
+        if cand is None or cand["id"] in seen:
+            continue
+        seen.add(cand["id"])
+        out.append(cand)
+    return out
+
+
+def store_candidates(candidates, store=None) -> int:
+    """Écrit des candidats (issus de `rag_candidates`) dans le RAG partagé, en un
+    appel. `store=None` → import paresseux du vectorstore. Renvoie le nombre écrit."""
+    if not candidates:
         return 0
     if store is None:
         from agents.pirate_agent import vectorstore as store  # import paresseux
-    store.add_texts(texts, metadatas=metadatas, ids=ids)
-    return len(texts)
+    store.add_texts([c["text"] for c in candidates],
+                    metadatas=[c["metadata"] for c in candidates],
+                    ids=[c["id"] for c in candidates])
+    return len(candidates)
+
+
+def promote_techniques_to_rag(techniques, mission_id: str, forbidden=(), store=None) -> int:
+    """Filtre (`rag_candidates`) puis écrit (`store_candidates`) en une fois.
+    `mission_id` est accepté mais volontairement ABSENT de ce qui est stocké (il
+    contient l'IP cible). Renvoie le nombre promu.
+
+    Le REPL ne l'appelle plus en fin de mission : il passe par `rag_candidates`,
+    montre les textes à l'opérateur et n'écrit que sur son ordre."""
+    return store_candidates(rag_candidates(techniques, forbidden), store=store)

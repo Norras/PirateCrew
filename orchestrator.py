@@ -3,6 +3,7 @@ import re
 import shutil
 import socket
 import offense.executor
+import offense.netns
 import offense.catalog_author
 from typing import TypedDict, List, Dict, Any, Literal
 from dotenv import load_dotenv
@@ -119,7 +120,53 @@ def resume_with_authorization(prev_thread_id: str, host: str, target: str) -> st
         return None
     new_id = mission_io.new_mission_id(target)
     _MISSIONS[new_id] = world
+    # La surcouche de techniques LLM suit le monde : sans elle, la technique que
+    # l'opérateur vient d'autoriser ne serait plus planifiable (l'auteur ne la
+    # réécrit pas, elle figure déjà dans les preuves de la mission).
+    if prev_thread_id in _MISSION_CATALOG:
+        _MISSION_CATALOG[new_id] = _MISSION_CATALOG[prev_thread_id]
     return new_id
+
+
+def _last_mission_after(prev: tuple, mission_id: str, target: str) -> tuple:
+    """(id, cible) de la dernière MISSION après un tour du REPL. Un tour sans monde
+    de mission (question, RAG, analyse de code) ne remplace pas la précédente :
+    « authorize » et « sessions » doivent continuer à viser ses sessions en attente."""
+    return (mission_id, target) if mission_id in _MISSIONS else prev
+
+
+# Promotion RAG en attente : textes candidats de la dernière mission, écrits dans
+# le RAG partagé UNIQUEMENT sur ordre de l'opérateur (commande « promote »).
+_PENDING_PROMOTION: List[dict] = []
+
+
+def queue_promotion(thread_id: str) -> List[str]:
+    """Prépare la promotion RAG des techniques LLM de la mission SANS rien écrire.
+
+    Renvoie les textes qui seraient stockés, pour relecture par l'opérateur ;
+    `promote_pending` les écrit ensuite. Le filtre automatique (secrets, principals,
+    noms d'hôte connus du WorldModel, IP, jetons à forte entropie) n'est qu'un
+    pré-tri : il ne reconnaît pas toute donnée de cible, d'où l'accord explicite."""
+    world = _MISSIONS.get(thread_id)
+    forbidden: List[str] = []
+    if world is not None:
+        for c in world.credentials:
+            forbidden += [v for v in (c.secret, c.principal) if v]
+        for h in world.hosts.values():
+            if h.hostname:
+                name = h.hostname.rstrip(".")
+                forbidden += [name, name.split(".", 1)[0], name.split(".", 1)[-1]]
+    _PENDING_PROMOTION[:] = offense.catalog_author.rag_candidates(
+        _MISSION_CATALOG.get(thread_id, []), forbidden)
+    return [c["text"] for c in _PENDING_PROMOTION]
+
+
+def promote_pending(store=None) -> int:
+    """Écrit dans le RAG les candidats en attente (ordre de l'opérateur) et vide la
+    file. Renvoie le nombre écrit ; en cas d'échec du store, la file est conservée."""
+    written = offense.catalog_author.store_candidates(list(_PENDING_PROMOTION), store=store)
+    _PENDING_PROMOTION.clear()
+    return written
 
 
 # --- 1. ÉTAT GLOBAL DE LA MISSION & DES REQUÊTES ---------------------------- #
@@ -138,6 +185,8 @@ class MissionState(TypedDict, total=False):
     execution_reports: List[Dict[str, Any]]
     final_response: str
     mission_success: bool
+    netns_missing: bool  # périmètre réseau absent ce cycle : chemin operator/llm non exécutable
+    resume: bool         # reprise après « authorize » : mission directe, sans routage LLM
 
 
 llm = ChatAnthropic(model="claude-sonnet-4-6")
@@ -304,6 +353,11 @@ def _parse_services(text: str) -> List[str]:
 
 # --- 2. SUPERVISEUR MAÎTRE (Le Routeur) ------------------------------------- #
 def master_supervisor(state: MissionState) -> Literal["delegate_pirate", "delegate_analyst", "autonomous_mission", "general_response"]:
+    if state.get("resume"):
+        # Reprise après « authorize » : l'autorisation est déjà consommée, la mission
+        # repart sans dépendre d'un classement LLM qui pourrait l'envoyer ailleurs.
+        print("\n[MASTER] Reprise après autorisation : mission autonome.")
+        return "autonomous_mission"
     print("\n[MASTER] Analyse de la requête par l'orchestrateur...")
     question = state.get("question", "")
 
@@ -372,6 +426,17 @@ def enter_autonomous_mission(state: MissionState, config):
     set_active_scope(scope)
     start_mission(thread_id, scope)
     print(f"[SCOPE] Périmètre chargé : {len(scope.networks)} entrée(s). Mission {thread_id!r} démarrée.")
+    # Périmètre réseau (namespace + nftables) : requis par le chemin offensif
+    # déterministe uniquement. Son absence ne refuse pas la mission — la
+    # reconnaissance et les outils builtin restent utilisables — mais on le dit d'emblée.
+    try:
+        offense.netns.verify(scope)
+        print(f"[NETNS] Périmètre réseau actif ({offense.netns.NS_NAME}).")
+        warning = offense.netns.loopback_warning(scope)
+        if warning:
+            print(warning)
+    except offense.netns.NetnsError as exc:
+        print(f"[NETNS] Chemin offensif désactivé : {exc}")
     return {"thread_id": thread_id, "cycle": 0, "max_cycles": state.get("max_cycles", 6),
             "finished": False}
 
@@ -852,9 +917,13 @@ def node_integrate(state: MissionState, config):
             world.mark_technique(report["host"], report["service"], report["technique"],
                                  report.get("inputs_fp", ""), status="tried",
                                  port=int(report.get("port", 0) or 0))
-    # Back-stop R1 : récupère creds/hosts dans les sorties brutes.
+    # Back-stop R1 : récupère creds/hosts dans les sorties brutes. Un blocage
+    # « périmètre réseau absent » n'est pas une sortie d'outil : son message (qui
+    # cite des adresses du périmètre) ne doit pas alimenter le modèle du monde.
     added = 0
     for report in reports:
+        if report.get("status") == "blocked_no_netns":
+            continue
         added += reconcile_evidence(world, report.get("detail", ""))
     cycle = state.get("cycle", 0) + 1
     summary = (f"Mission (cycle {cycle}) : {len(world.in_scope_hosts())} hôte(s) in-scope, "
@@ -867,13 +936,20 @@ def node_integrate(state: MissionState, config):
         hints = " ; ".join(f"{t} (`sudo apt install -y {t}`)" for t in missing)
         summary += ("\n⚠ Techniques en attente d'un outil absent : " + hints +
                     ". Installe-le(s) dans l'environnement (Kali) puis relance la même mission pour les débloquer.")
+    # Escalade « périmètre réseau absent » : même contrat que l'outil manquant —
+    # les techniques operator/llm ne sont PAS marquées (replanifiables après mise
+    # en place du namespace), l'opérateur est prévenu une fois par cycle.
+    netns_blocked = [r for r in reports if r.get("status") == "blocked_no_netns"]
+    if netns_blocked:
+        summary += (f"\n⚠ {len(netns_blocked)} technique(s) en attente du périmètre réseau. "
+                    "Périmètre réseau non en place : lancez « sudo python -m offense.netns up » puis relancez.")
     print(f"[MISSION] Intégration : {summary}")
     # Persistance à chaque cycle : les trouvailles survivent à un crash/interruption.
     try:
         mission_io.save_world(world, thread_id)
     except Exception as e:  # persistance au mieux : ne jamais interrompre la mission
         print(f"[MISSION] avertissement: persistance échouée ({type(e).__name__})")
-    return {"cycle": cycle, "final_response": summary}
+    return {"cycle": cycle, "final_response": summary, "netns_missing": bool(netns_blocked)}
 
 
 def route_after_integrate(state: MissionState) -> Literal["continue", "finish"]:
@@ -890,9 +966,17 @@ def route_after_integrate(state: MissionState) -> Literal["continue", "finish"]:
         # On ne continue QUE s'il reste une tâche réellement EXÉCUTABLE. Les tâches
         # bloquées par un outil absent sont signalées mais ne font pas tourner la
         # boucle à vide jusqu'au cap de cycles (cf. escalade Option Y).
+        # Idem sans périmètre réseau : les techniques operator/llm ne sont pas exécutables.
         cat = _effective_catalog(thread_id)
-        runnable = [t for t in plan_tasks(world, cat)
-                    if technique_available(technique_by_id(cat, t["technique_id"]))]
+        netns_missing = bool(state.get("netns_missing"))
+        runnable = []
+        for t in plan_tasks(world, cat):
+            tech = technique_by_id(cat, t["technique_id"])
+            if not technique_available(tech):
+                continue
+            if netns_missing and tech.provided_by in ("operator", "llm"):
+                continue
+            runnable.append(t)
         if not runnable:
             print("\n[MISSION] Épuisement : plus aucune tâche exécutable in-scope — fin.")
             return "finish"
@@ -1011,9 +1095,21 @@ if __name__ == "__main__":
                         print(f"[SESSIONS] {_s.host} / {_s.channel} — {_etat}")
                 continue
 
+            # Écriture dans le RAG partagé des techniques LLM proposées en fin de
+            # mission : uniquement sur cet ordre explicite de l'opérateur.
+            if _parts[0] == "promote":
+                try:
+                    _n = promote_pending()
+                    print(f"[PROMOTE] {_n} technique(s) ajoutée(s) au RAG." if _n
+                          else "[PROMOTE] rien à promouvoir.")
+                except Exception as exc:
+                    print(f"[PROMOTE] échec ({type(exc).__name__}) — rien n'a été ajouté.")
+                continue
+
             # Cible = première IP mentionnée dans la requête, sinon 127.0.0.1.
             _ipm = re.search(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", user_input)
 
+            _resume = False
             if _parts[0] == "authorize":
                 if not _ipm:
                     print("[AUTHORIZE] usage : authorize <hôte (IPv4)>")
@@ -1028,15 +1124,16 @@ if __name__ == "__main__":
                 _question = f"Lance la reprise post-exploitation de {_host} (audit/exploitation de la cible)"
                 mission_id, target = new_id, _last_target
                 user_input = _question
+                _resume = True
             else:
                 target = _ipm.group(0) if _ipm else "127.0.0.1"
                 # Identité de mission : un mission_id par exécution = thread_id.
                 mission_id = mission_io.new_mission_id(target)
-            _last_mission_id, _last_target = mission_id, target
             config = {"configurable": {"thread_id": mission_id}}
 
             initial_state = {
                 "question": user_input,
+                "resume": _resume,
                 "target": target,
                 "goal": user_input,
                 "thread_id": mission_id,
@@ -1066,18 +1163,21 @@ if __name__ == "__main__":
                         print(f"\n[MISSION] Rapport : {report_path}")
                     except Exception as exc:
                         print(f"[MISSION] avertissement: persistance échouée ({type(exc).__name__})")
-                    # Boucle d'apprentissage : promouvoir les techniques rédigées
-                    # par l'auteur LLM dans le RAG (gabarits sans secret). Best-effort.
+                    # Boucle d'apprentissage : les techniques rédigées par l'auteur
+                    # LLM sont PROPOSÉES pour le RAG partagé, jamais écrites d'office —
+                    # l'opérateur relit ce qui serait stocké puis tape « promote ».
                     try:
-                        _creds = w.credentials
-                        _forbidden = ([c.secret for c in _creds if c.secret]
-                                      + [c.principal for c in _creds if c.principal])
-                        promoted = offense.catalog_author.promote_techniques_to_rag(
-                            _MISSION_CATALOG.get(mission_id, []), mission_id, forbidden=_forbidden)
-                        if promoted:
-                            print(f"[MISSION] {promoted} technique(s) LLM promue(s) dans le RAG.")
+                        _cands = queue_promotion(mission_id)
+                        if _cands:
+                            print(f"[MISSION] {len(_cands)} technique(s) LLM proposée(s) pour le RAG partagé. "
+                                  "Relisez-les, puis tapez « promote » pour les y ajouter :")
+                            for _c in _cands:
+                                print(f"  - {_c}")
                     except Exception as exc:
-                        print(f"[MISSION] avertissement: promotion RAG échouée ({type(exc).__name__})")
+                        print(f"[MISSION] avertissement: préparation de la promotion RAG échouée ({type(exc).__name__})")
+            # Dernière MISSION connue (un tour sans mission ne la remplace pas).
+            _last_mission_id, _last_target = _last_mission_after(
+                (_last_mission_id, _last_target), mission_id, target)
             print(f"\nPirateCrew >\n{result.get('final_response', 'Aucune réponse générée.')}")
             # Gate session : remonte les sessions obtenues mais non autorisées.
             _w = _MISSIONS.get(mission_id)
