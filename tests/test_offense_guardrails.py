@@ -308,12 +308,18 @@ def test_file_scheme_not_mangled_into_host():
     assert g.scope_violations("curl http:///203.0.113.9/") == ["203.0.113.9"]
 
 
-def test_identity_flag_value_not_treated_as_host(monkeypatch):
-    # Régression B2 corrigée : la valeur d'un flag d'identité (-u user@DOMAIN, -d domain)
-    # est un identifiant (UPN/NetBIOS), pas un hôte -> jamais résolue ni contrôlée.
+def test_identity_flag_at_value_not_host_but_bare_host_still_checked(monkeypatch):
+    # Régression B2 corrigée SANS ouvrir de trou : la valeur @ d'un flag d'identité
+    # (-u svc@CONTOSO) est un UPN/credential -> pas un hôte. MAIS un hôte NU après le
+    # même flag garde son contrôle : -u = UDP pour nc, -d = debug pour nmap. On ne
+    # skippe QUE la forme @ (sinon nc -u IP / nmap -d IP seraient des contournements).
     set_active_scope(Scope.from_lines(["10.0.0.0/24"]))
     def boom(name):
-        raise AssertionError(f"DNS interdit sur une identité : {name}")
+        raise AssertionError(f"DNS inattendu (formes @ skippées, IP littérales pures) : {name}")
     monkeypatch.setattr(__import__("scope").socket, "gethostbyname", boom)
+    # formes @ (credential) -> jamais contrôlées, pas de faux positif
     assert g.scope_literal_violations("crackmapexec smb 10.0.0.5 -u svc@CONTOSO -p pw") == []
     assert g.scope_literal_violations("cme smb 10.0.0.5 -u admin@corp.local -p pw") == []
+    # hôte NU après -u/-d (collision UDP/debug) -> TOUJOURS contrôlé (pas de contournement)
+    assert g.scope_violations("nc -u 203.0.113.9 4444") == ["203.0.113.9"]
+    assert g.scope_violations("nmap -d 203.0.113.9") == ["203.0.113.9"]

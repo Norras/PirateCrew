@@ -112,9 +112,9 @@ _NETWORK_SCHEMES: frozenset[str] = frozenset({
     "mongodb", "gopher", "dict", "rsync", "nfs",
 })
 
-# Flags dont la VALEUR est une identité/un secret (user@realm, mot de passe, hash),
-# jamais une cible de connexion : on n'extrait pas d'hôte du token qui suit. Évite
-# de prendre un UPN/NetBIOS (-u svc@CONTOSO) ou un domaine (-d corp.local) pour un hôte.
+# Flags dont la VALEUR @ est une identité (UPN user@realm) : on n'extrait pas d'hôte du
+# token QUI SUIT ET CONTIENT '@' (cf. _host_candidates). On ne skippe QUE la forme @ :
+# un hôte nu après -u (nc = UDP) ou -d (nmap = debug) reste contrôlé (pas de contournement).
 _IDENTITY_FLAGS: frozenset[str] = frozenset({
     "-u", "--user", "--username", "-U", "-p", "--password", "--pass",
     "-d", "--domain", "-H", "--hashes", "--hash",
@@ -186,9 +186,12 @@ def _host_candidates(rendered: str) -> list[tuple[str, bool]]:
     pos: dict[str, int] = {}
     prev = ""
     for tok in tokens:
-        is_identity_value = prev in _IDENTITY_FLAGS   # valeur d'un -u/-p/-d/-H… : identité, pas hôte
+        # On ne skippe QUE la forme @ d'un flag d'identité (-u svc@REALM = UPN/credential,
+        # jamais une cible de connexion). Un hôte NU après le même flag garde son contrôle :
+        # -u est aussi « UDP » (nc), -d « debug » (nmap) -> nc -u IP / nmap -d IP restent vérifiés.
+        is_identity_at_value = prev in _IDENTITY_FLAGS and "@" in tok
         prev = tok
-        if is_identity_value:
+        if is_identity_at_value:
             continue
         res = _host_from_token(tok)
         if res is None:

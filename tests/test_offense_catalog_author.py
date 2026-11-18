@@ -277,7 +277,7 @@ def test_author_accepts_capture_and_identity_templates():
                 "tshark -w {capture}.cap host {target}",
                 "nmap {target} -oA {output}.report",
                 "nmap {target} -oN {output}.scan",
-                "crackmapexec smb {target} -u {user} -d {domain}.local",
+                "crackmapexec smb {target} -u {user} -d {domain}",
                 "crackmapexec smb {target} -u {user}@{domain} -p {password}"]:
         raw = json.dumps({"id": "llm.ok", "service": "smb", "tool": "x",
                           "command_template": tpl, "success_signal": "ok"})
