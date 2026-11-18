@@ -13,9 +13,7 @@ Lancement (Linux, root) :
 """
 import os
 import shutil
-import socket
 import subprocess
-import sys
 import tempfile
 import time
 
@@ -29,90 +27,11 @@ import pytest
 from offense import netns
 from scope import Scope, set_active_scope
 
-_ENABLED = (sys.platform == "linux"
-            and getattr(os, "geteuid", lambda: -1)() == 0
-            and os.environ.get("PIRATECREW_NETNS_IT") == "1")
+from netns_bench import CURL, IN_SCOPE, MARKER, MARKS, OUT_OF_SCOPE
+from netns_bench import _active_scope, bench  # noqa: F401 — fixtures du banc d'essai
+from netns_bench import sh as _sh
 
-pytestmark = [
-    pytest.mark.netns,
-    pytest.mark.skipif(not _ENABLED, reason="intégration netns : Linux + root + PIRATECREW_NETNS_IT=1"),
-]
-
-TARGET_NS = "pc-it-target"
-HOST_IF, TARGET_IF = "pc-it-h", "pc-it-t"
-IN_SCOPE, OUT_OF_SCOPE = "198.51.100.10", "203.0.113.9"
-MARKER = "PC_IT_MARKER_7f3a"
-CURL = ["curl", "-s", "-m", "3"]
-
-
-def _sh(*argv, check=True):
-    return subprocess.run(list(argv), capture_output=True, text=True, check=check)
-
-
-def _wait_port(host, port, timeout=10.0):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            with socket.create_connection((host, port), timeout=1):
-                return
-        except OSError:
-            time.sleep(0.2)
-    raise RuntimeError(f"serveur de test injoignable : {host}:{port}")
-
-
-def _cleanup_target():
-    _sh("ip", "netns", "del", TARGET_NS, check=False)
-    _sh("ip", "link", "del", HOST_IF, check=False)
-
-
-@pytest.fixture(scope="module")
-def bench(tmp_path_factory):
-    web = tmp_path_factory.mktemp("web")
-    (web / "index.html").write_text(MARKER, encoding="utf-8")
-    os.chmod(web, 0o755)
-    forward_before = open("/proc/sys/net/ipv4/ip_forward").read().strip()
-
-    _cleanup_target()
-    in_target = ["ip", "netns", "exec", TARGET_NS]
-    _sh("ip", "netns", "add", TARGET_NS)
-    _sh("ip", "link", "add", HOST_IF, "type", "veth", "peer", "name", TARGET_IF)
-    _sh("ip", "link", "set", TARGET_IF, "netns", TARGET_NS)
-    _sh("ip", "addr", "add", "198.51.100.1/24", "dev", HOST_IF)
-    _sh("ip", "addr", "add", "203.0.113.1/24", "dev", HOST_IF)
-    _sh("ip", "link", "set", HOST_IF, "up")
-    _sh(*in_target, "ip", "addr", "add", f"{IN_SCOPE}/24", "dev", TARGET_IF)
-    _sh(*in_target, "ip", "addr", "add", f"{OUT_OF_SCOPE}/24", "dev", TARGET_IF)
-    _sh(*in_target, "ip", "link", "set", TARGET_IF, "up")
-    _sh(*in_target, "ip", "link", "set", "lo", "up")
-
-    serve = [sys.executable, "-m", "http.server", "--bind", "0.0.0.0", "--directory", str(web)]
-    quiet = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
-    servers = [subprocess.Popen([*in_target, *serve, "8000"], **quiet),   # la cible
-               subprocess.Popen([*serve, "8001"], **quiet)]               # un service de l'hôte
-    scope = Scope.from_lines([f"{IN_SCOPE}/32"])
-    try:
-        # Témoin : depuis l'hôte (non filtré), les DEUX adresses de la cible répondent.
-        # Un refus depuis le namespace ne peut donc venir que du filtre.
-        _wait_port(IN_SCOPE, 8000)
-        _wait_port(OUT_OF_SCOPE, 8000)
-        _wait_port("127.0.0.1", 8001)
-        netns.up(scope)
-        yield scope
-    finally:
-        netns.down()
-        for proc in servers:
-            proc.terminate()
-        for proc in servers:
-            proc.wait(timeout=5)
-        _cleanup_target()
-        _sh("sysctl", "-w", f"net.ipv4.ip_forward={forward_before}", check=False)
-
-
-@pytest.fixture(autouse=True)
-def _active_scope(bench, monkeypatch, tmp_path):
-    import tools.registry as reg
-    monkeypatch.setattr(reg, "AUDIT_LOG", str(tmp_path / "audit.log"))
-    set_active_scope(bench)
+pytestmark = MARKS
 
 
 def test_in_scope_reachable():

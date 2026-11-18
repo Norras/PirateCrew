@@ -232,8 +232,13 @@ Preuve d'intégration du périmètre réseau (Linux, root — crée deux namespa
 ne sort de la machine) :
 
 ```bash
-sudo PIRATECREW_NETNS_IT=1 venv/bin/pytest tests/test_netns_integration.py -v
+sudo PIRATECREW_NETNS_IT=1 venv/bin/pytest tests/test_netns_integration.py tests/test_netns_round3_replay.py -v
 ```
+
+`test_netns_round3_replay.py` rejoue, avec les vrais outils (`curl`, `sqlmap`, `ffuf`, `wfuzz`,
+`scp`, `rsync`, `nmap`, `smbclient`, `ssh`), les contournements du contrôle texte confirmés par
+la revue adverse du 18/11/2026 : aucun paquet n'atteint la cible hors périmètre, et le filtre
+compte bien les paquets que chaque outil a tenté d'émettre.
 
 > Sous Windows, le **premier** lancement peut prendre quelques minutes : l'antivirus
 > scanne les imports `langchain` au chargement. Les tests n'effectuent **aucun** appel
