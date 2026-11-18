@@ -28,9 +28,10 @@ def build_author_prompt(service: str, context: str) -> str:
         "Réponds par exactement UN objet JSON, sans autre texte, avec les clés : "
         "id, name, domain, service, requires, tool, command_template, "
         "success_signal, opens_session.\n"
-        "command_template DOIT utiliser les placeholders {target} {user} {hash} "
-        "{domain} {share} et JAMAIS de valeur littérale (IP, identifiant, mot de "
-        "passe) : une technique à valeurs littérales n'est pas réutilisable.\n"
+        "command_template DOIT utiliser les placeholders {target} (hôte) {port} "
+        "{user} {password} (mot de passe en clair) {hash} (empreinte) {domain} "
+        "{share} et JAMAIS de valeur littérale (IP, identifiant, mot de passe) : "
+        "une technique à valeurs littérales n'est pas réutilisable.\n"
         "INTERDIT : métacaractères shell (; | & > < ` $) et toute action "
         "destructive (suppression, formatage, arrêt, déni de service)."
     )

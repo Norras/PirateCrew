@@ -84,6 +84,57 @@ def test_author_context_redacts_known_secret():
     assert "***" in ctx               # marqueur de rédaction présent
 
 
+def test_author_context_ajoute_les_connaissances_rag():
+    from orchestrator import _author_context
+    w = WorldModel(scope=Scope.from_lines(["10.0.0.0/24"]))
+    w.add_service("10.0.0.5", 445, name="smb")
+    assert "Connaissances" not in _author_context(w, "smb")          # sans RAG : inchangé
+    ctx = _author_context(w, "smb", extra="Note : énumérer les partages en session nulle")
+    assert "Connaissances" in ctx and "session nulle" in ctx
+
+
+class _Doc:
+    def __init__(self, text, source=""):
+        self.page_content = text
+        self.metadata = {"source": source} if source else {}
+
+
+def test_rag_for_author_interroge_le_service_et_borne_les_extraits():
+    import orchestrator as o
+    queries = []
+
+    def search(query, k):
+        queries.append((query, k))
+        return [_Doc("A" * 5000), _Doc("gabarit smbclient", source="llm_authored")]
+    out = o._rag_for_author("smb", search=search)
+    assert "smb" in queries[0][0]
+    assert "A" * 500 in out and "A" * 600 not in out                  # extrait borné
+    assert "gabarit smbclient" in out and "technique promue" in out   # source signalée
+
+
+def test_rag_for_author_ne_leve_jamais():
+    import orchestrator as o
+
+    def boom(query, k):
+        raise RuntimeError("chroma hors ligne")
+    assert o._rag_for_author("smb", search=boom) == ""
+    assert o._rag_for_author("smb", search=lambda q, k: []) == ""
+
+
+def test_node_decide_passe_le_rag_a_l_auteur(monkeypatch, tmp_path):
+    import orchestrator as o
+    import offense.catalog_author as author
+    w = WorldModel(scope=Scope.from_lines(["10.0.0.0/24"]))
+    w.add_service("10.0.0.5", 5432, name="postgresql")               # aucun builtin
+    monkeypatch.setattr(o, "get_world", lambda tid: w)
+    monkeypatch.setattr(o, "_rag_for_author", lambda svc, search=None: f"NOTE-RAG-{svc}")
+    seen = []
+    monkeypatch.setattr(author, "author_technique",
+                        lambda svc, ctx, invoke: seen.append((svc, ctx)) or None)
+    o.node_decide({"discovered_services": []}, {"configurable": {"thread_id": "t-rag"}})
+    assert seen and seen[0][0] == "postgresql" and "NOTE-RAG-postgresql" in seen[0][1]
+
+
 def test_integrate_captures_raw_evidence():
     wm = WorldModel(scope=Scope.from_lines(["10.10.10.0/24"]))
     n = reconcile_evidence(wm, "Found creds admin:Password1 on 10.10.10.5")
@@ -305,6 +356,71 @@ def test_reconcile_ignores_header_like_value_near_cue():
     wm = WorldModel(scope=Scope.from_lines(["10.10.10.0/24"]))
     reconcile_evidence(wm, "Password policy:\nServer:nginx")
     assert len(wm.credentials) == 0
+
+
+def _creds(text):
+    wm = WorldModel(scope=Scope.from_lines(["10.10.10.0/24"]))
+    reconcile_evidence(wm, text)
+    return {(c.principal, c.secret) for c in wm.credentials}
+
+
+def test_reconcile_cle_valeur_francais():
+    # Fichier de configuration « clé = valeur » : identifiant + mot de passe voisins.
+    assert _creds("[sauvegarde]\nutilisateur = svc-sauvegarde\nmot_de_passe = Lab-Fictif-2026!") \
+        == {("svc-sauvegarde", "Lab-Fictif-2026!")}
+
+
+def test_reconcile_cle_valeur_env_yaml_json():
+    assert _creds('DB_USER=app\nDB_PASSWORD="s3cret!"') == {("app", "s3cret!")}
+    assert _creds("db:\n  username: alice\n  password: 'Wond3rland'") == {("alice", "Wond3rland")}
+    assert _creds('{\n  "login": "bob",\n  "passwd": "B0bPass!",\n}') == {("bob", "B0bPass!")}
+
+
+def test_reconcile_cle_valeur_sans_identifiant_ou_valeur_factice():
+    assert _creds("password = hunter2") == set()                      # pas d'identifiant voisin
+    assert _creds("user = admin\npassword = ${DB_PASS}") == set()     # variable, pas un secret
+    assert _creds("user = admin\npassword = ********") == set()       # masqué
+    assert _creds("user = admin\npassword =") == set()                # vide
+    assert _creds("user = admin\n\n\n\n\npassword = hunter2") == set()  # trop éloignés
+
+
+def test_reconcile_nom_de_cle_jamais_pris_pour_un_identifiant():
+    # « password:hunter2 » sur une ligne à indice : le principal serait « password ».
+    assert _creds("password:hunter2") == set()
+
+
+def test_reconcile_indice_francais_pour_la_forme_identifiant_secret():
+    assert _creds("Identifiants du serveur :\nbob:Sup3rSecret") == {("bob", "Sup3rSecret")}
+
+
+def test_node_integrate_lit_les_sorties_d_outils_pas_seulement_le_resume(monkeypatch, tmp_path):
+    # Chemin agent (builtin) : le résumé du LLM ne recopie pas le fichier lu, mais la
+    # sortie de l'outil le contient — le rattrapage doit la voir.
+    import orchestrator as orch
+    from state import mission_io
+    monkeypatch.setattr(mission_io, "MISSIONS_ROOT", tmp_path)
+
+    class _Tool:
+        type = "tool"
+        content = "HTTP 200\n[site]\nutilisateur = svc-x\nmot_de_passe = Xy-Fictif-99!"
+
+    class _Final:
+        type = "ai"
+        content = "J'ai lu le fichier de sauvegarde."
+
+    class _Agent:
+        def invoke(self, _):
+            return {"messages": [_Tool(), _Final()]}
+    monkeypatch.setattr("agents.dynamic_agent.build_task_agent",
+                        lambda domain, world=None, mission_context="": _Agent())
+    wm = WorldModel(scope=Scope.from_lines(["10.10.10.0/24"]))
+    wm.add_service("10.10.10.5", 80, name="http")
+    orch._MISSIONS["t_tool_out"] = wm
+    cfg = {"configurable": {"thread_id": "t_tool_out"}}
+    planned = [t for t in plan_tasks(wm, orch._CATALOG) if t["technique_id"] == "http.get"]
+    reports = orch.node_execute({"planned": planned, "rag_context": ""}, cfg)["execution_reports"]
+    orch.node_integrate({"planned": planned, "execution_reports": reports, "cycle": 0}, cfg)
+    assert any(c.principal == "svc-x" and c.secret == "Xy-Fictif-99!" for c in wm.credentials)
 
 
 def test_discover_services_logs_each_open_port():
@@ -615,6 +731,65 @@ def test_node_integrate_clears_netns_missing_when_nothing_blocked(monkeypatch, t
     out = orch.node_integrate({"planned": [], "execution_reports": [], "cycle": 0,
                                "netns_missing": True}, {"configurable": {"thread_id": "t_nn2"}})
     assert out["netns_missing"] is False
+
+
+def _smb_exhausted(thread_id):
+    import orchestrator as orch
+    wm = WorldModel(scope=Scope.from_lines(["127.0.0.1/32"]))
+    wm.add_service("127.0.0.1", 445, name="smb")
+    for tid in ("smb.port_probe", "smb.enum_shares"):
+        wm.mark_technique("127.0.0.1", "smb", tid, inputs_fp="", port=445)
+    orch._MISSIONS[thread_id] = wm
+    return wm
+
+
+def test_route_continue_pour_laisser_l_auteur_traiter_un_service_epuise(monkeypatch):
+    # Toutes les techniques builtin du service tentées : la mission doit repasser par
+    # decide, où l'auteur LLM prend le relais — pas s'arrêter avant.
+    import orchestrator as orch
+    monkeypatch.setattr(orch, "technique_available", lambda t: True)
+    _smb_exhausted("t_route_dry")
+    base = {"cycle": 1, "max_cycles": 6, "thread_id": "t_route_dry"}
+    assert route_after_integrate(base) == "continue"
+    # sans périmètre réseau, une technique LLM ne pourrait pas s'exécuter : fin
+    assert route_after_integrate({**base, "netns_missing": True}) == "finish"
+
+
+def test_auteur_une_seule_tentative_par_service(monkeypatch):
+    # L'auteur ne propose rien d'utilisable : la tentative compte quand même, sinon la
+    # boucle le rappellerait à chaque cycle jusqu'au cap.
+    import orchestrator as orch
+    import offense.catalog_author as author
+    monkeypatch.setattr(orch, "technique_available", lambda t: True)
+    monkeypatch.setattr(orch, "_rag_for_author", lambda svc, search=None: "")
+    calls = []
+    monkeypatch.setattr(author, "author_technique",
+                        lambda svc, ctx, invoke: calls.append(svc) or None)
+    _smb_exhausted("t_author_once")
+    cfg = {"configurable": {"thread_id": "t_author_once"}}
+    orch.node_decide({"discovered_services": []}, cfg)
+    orch.node_decide({"discovered_services": []}, cfg)
+    assert calls == ["smb"]
+    assert route_after_integrate({"cycle": 2, "max_cycles": 6,
+                                  "thread_id": "t_author_once"}) == "finish"
+
+
+def test_route_ne_boucle_pas_sur_une_technique_llm_en_propose_only(monkeypatch):
+    import orchestrator as orch
+    from catalog.loader import Technique
+    tech = Technique(id="llm.x", name="x", domain="ad", service="smb", requires=set(),
+                     tool="smbclient", command_template="smbclient -L //{target} -N",
+                     success_signal="Sharename", provided_by="llm")
+    monkeypatch.setattr(orch, "_CATALOG", [tech])
+    monkeypatch.setattr(orch, "technique_available", lambda t: True)
+    wm = WorldModel(scope=Scope.from_lines(["127.0.0.1/32"]))
+    wm.add_service("127.0.0.1", 445, name="smb")
+    wm.add_evidence({"kind": "llm_technique", "service": "smb", "id": "llm.x"})
+    orch._MISSIONS["t_route_po"] = wm
+    base = {"cycle": 1, "max_cycles": 6, "thread_id": "t_route_po"}
+    assert route_after_integrate(base) == "continue"
+    monkeypatch.setattr(orch, "_PROPOSE_ONLY", True)
+    assert route_after_integrate(base) == "finish"      # proposée, jamais exécutée : pas de boucle
 
 
 def test_route_finishes_when_only_netns_blocked_tasks_remain(monkeypatch):

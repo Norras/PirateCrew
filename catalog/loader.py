@@ -71,8 +71,8 @@ def load_catalog(builtin_dir: str = "catalog/builtin",
 
 
 def techniques_for(catalog: list[Technique], service: str) -> list[Technique]:
-    """Techniques déclarées pour un service donné."""
-    return [t for t in catalog if t.service == service]
+    """Techniques déclarées pour un service donné, plus les transverses (`service: "*"`)."""
+    return [t for t in catalog if t.service in (service, "*")]
 
 
 def technique_by_id(catalog: list[Technique], tech_id: str) -> Technique:
