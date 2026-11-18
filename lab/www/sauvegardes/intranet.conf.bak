@@ -1,0 +1,10 @@
+# Sauvegarde de configuration — DONNÉES FICTIVES DU LAB PIRATECREW
+[site]
+nom = Comptoir des Sept Mers
+hote = 192.0.2.2
+
+[sauvegarde]
+partage = //192.0.2.2/archives
+utilisateur = svc-sauvegarde
+mot_de_passe = Lab-Fictif-2026!
+horaire = 02:30
