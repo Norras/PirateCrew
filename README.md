@@ -53,6 +53,46 @@ outils de leur domaine, plus les outils obligatoires (audit + vérification de p
 - Chaque action est horodatée dans `audit.log` (sauts de ligne neutralisés pour
   empêcher la forge de fausses lignes de log).
 
+### Périmètre réseau (chemin offensif)
+
+Les techniques `operator` et `llm` sont des gabarits de commande : aucun contrôle sur le
+*texte* d'une commande ne peut dire de façon fiable où l'outil va se connecter (IP décimale,
+hexadécimale, point final, URL tordue…). Pour ce chemin, c'est donc le **noyau** qui applique
+le périmètre : la commande s'exécute dans un *network namespace* (`pc-offense`) dont la seule
+sortie est filtrée par nftables sur les IP de `scope.txt`. L'écriture de l'hôte n'a plus
+d'importance.
+
+```bash
+sudo python -m offense.netns up            # à relancer après toute modification de scope.txt
+sudo python -m offense.netns up --dns IP   # idem, avec un résolveur in-scope (ex. un DC)
+python -m offense.netns status             # ce que le noyau autorise réellement
+sudo python -m offense.netns down
+```
+
+- **Fail-closed, sans contournement** : si le namespace est absent, ou si le set du noyau
+  n'est pas exactement le périmètre actif, la technique n'est pas exécutée
+  (`blocked_no_netns`), n'est pas « grillée » dans le ledger, et l'opérateur est prévenu.
+  La reconnaissance et les outils builtin restent utilisables (ils contactent déjà l'IP
+  validée).
+- **Linux uniquement, root pour la mise en place.** `up` installe un script d'aide
+  (`/usr/local/sbin/pc-netns-exec`) et une règle sudoers limitée à ce script ; la commande
+  s'exécute ensuite avec **vos** privilèges, pas en root. `up` active
+  `net.ipv4.ip_forward`, que `down` ne remet pas à zéro.
+- **DNS fermé par défaut** dans le namespace (`/etc/hosts` reste visible) ; services de la
+  machine elle-même (loopback, IP locales) injoignables ; IPv6 désactivé.
+
+Limites connues :
+
+- rebond par un hôte in-scope (`curl -x` vers un proxy du périmètre) ;
+- lectures locales (`curl file://…`) — ce n'est pas du réseau ;
+- connexions entrantes vers le namespace (reverse shell : demanderait un DNAT) ;
+- périmètre IPv6 non appliqué (IPv4 seulement) ;
+- scans à sockets brutes en non-root (`nmap -sS`) : poser `setcap cap_net_raw+ep` sur nmap ;
+- une commande **déjà en cours** quand la table nftables est supprimée n'est plus filtrée
+  (les suivantes sont refusées) ;
+- un autre pare-feu en `DROP` sur le transit (Docker, iptables `FORWARD`) peut bloquer des
+  cibles in-scope : le symptôme est un timeout, pas une fuite.
+
 ## Prérequis
 
 - **Python 3.11+** (testé en 3.13)
@@ -169,10 +209,21 @@ Sous Windows, le plus simple pour disposer d'un vrai arsenal (`nmap`, `smbclient
 utilisent alors les binaires présents ; ceux qui manquent sont signalés (voir ci-dessus).
 Étapes détaillées : [`docs/MILESTONES.md`](docs/MILESTONES.md).
 
+C'est aussi là que fonctionne le [périmètre réseau](#périmètre-réseau-chemin-offensif)
+(namespaces + nftables, vérifié sur le noyau WSL2) : sans lui, les techniques
+`operator`/`llm` ne s'exécutent pas.
+
 ## Tests
 
 ```bash
 pytest -q
+```
+
+Preuve d'intégration du périmètre réseau (Linux, root — crée deux namespaces locaux, rien
+ne sort de la machine) :
+
+```bash
+sudo PIRATECREW_NETNS_IT=1 venv/bin/pytest tests/test_netns_integration.py -v
 ```
 
 > Sous Windows, le **premier** lancement peut prendre quelques minutes : l'antivirus
@@ -190,6 +241,10 @@ agents/
   pirate_agent.py      # agent RAG (base de connaissances)
   analyst_agent.py     # agent d'analyse de code
 tools/registry.py      # outils @tool (network / web / ad) + chokepoint de périmètre
+offense/
+  guardrails.py        # garde-fous texte (shell, destructif, périmètre best-effort)
+  executor.py          # exécuteur déterministe des gabarits operator/llm
+  netns.py             # périmètre appliqué par le noyau (namespace + nftables)
 catalog/
   builtin/             # techniques fournies (recon / web / smb)
   operator/            # techniques locales de l'opérateur (non versionné)
