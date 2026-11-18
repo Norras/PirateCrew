@@ -26,9 +26,12 @@ from scope import Scope, ScopeError, get_active_scope, load_scope
 NS_NAME = "pc-offense"
 HOST_IF = "pc-host"
 NS_IF = "pc-ns"
-LINK_NET = "10.200.77.0/30"
-HOST_ADDR = "10.200.77.1"
-NS_ADDR = "10.200.77.2"
+# Lien interne hôte <-> namespace (les deux bouts de la paire veth). Pris dans la
+# plage partagée des opérateurs (100.64.0.0/10, RFC 6598) et non dans une plage
+# privée : un périmètre couvrant 10/8, 172.16/12 ou 192.168/16 ne le chevauche pas.
+LINK_NET = "100.127.77.0/30"
+HOST_ADDR = "100.127.77.1"
+NS_ADDR = "100.127.77.2"
 NFT_TABLE = "piratecrew"
 NFT_SET = "scope4"
 HELPER_PATH = "/usr/local/sbin/pc-netns-exec"

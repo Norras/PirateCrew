@@ -62,7 +62,7 @@ def test_out_of_scope_blocked_whatever_the_notation(url):
 
 
 @pytest.mark.parametrize("url", [
-    "http://10.200.77.1:8001/",        # l'hôte, par le lien du namespace
+    f"http://{netns.HOST_ADDR}:8001/",  # l'hôte, par le lien du namespace
     "http://127.0.0.1:8001/",          # loopback : celui du namespace, vide
     "http://198.51.100.1:8001/",       # une autre adresse de l'hôte
 ])

@@ -33,14 +33,26 @@ def test_ruleset_refuses_empty_and_overlap():
     with pytest.raises(netns.NetnsError):
         netns.nft_ruleset([])
     with pytest.raises(netns.NetnsError):
-        netns.nft_ruleset([ipaddress.ip_network("10.200.0.0/16")])   # chevauche LINK_NET
+        netns.nft_ruleset([ipaddress.ip_network("100.127.0.0/16")])   # chevauche LINK_NET
+
+
+@pytest.mark.parametrize("private", ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"])
+def test_link_stays_out_of_private_ranges(private):
+    # Le lien interne vit dans la plage partagée des opérateurs (100.64.0.0/10,
+    # RFC 6598), pas dans une plage privée : un périmètre de test couvrant tout
+    # 10/8 (ou un lab en 10.200.x.x) doit rester acceptable.
+    link = ipaddress.ip_network(netns.LINK_NET)
+    assert link.subnet_of(ipaddress.ip_network("100.64.0.0/10"))
+    assert not link.overlaps(ipaddress.ip_network(private))
+    assert "@scope4 accept" in netns.nft_ruleset([ipaddress.ip_network(private)])
+    assert ipaddress.ip_address(netns.HOST_ADDR) in link and ipaddress.ip_address(netns.NS_ADDR) in link
 
 
 def test_setup_orders_and_disables_v6():
     cmds = netns.setup_commands()
     assert cmds[0] == ["ip", "netns", "add", "pc-offense"]
     assert ["ip", "netns", "exec", "pc-offense", "sysctl", "-w", "net.ipv6.conf.all.disable_ipv6=1"] in cmds
-    assert ["ip", "netns", "exec", "pc-offense", "ip", "route", "add", "default", "via", "10.200.77.1"] in cmds
+    assert ["ip", "netns", "exec", "pc-offense", "ip", "route", "add", "default", "via", "100.127.77.1"] in cmds
     assert cmds[-1] == ["sysctl", "-w", "net.ipv4.ip_forward=1"]
 
 
