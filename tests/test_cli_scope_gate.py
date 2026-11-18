@@ -18,6 +18,25 @@ def test_mission_starts_with_scope(tmp_path, monkeypatch):
     assert out.get("finished") is not True
 
 
+def test_mission_start_reports_network_perimeter_state(tmp_path, monkeypatch, capsys):
+    # La porte de mission dit d'emblée si le chemin offensif est utilisable ; un
+    # périmètre réseau absent ne refuse PAS la mission (la reconnaissance reste possible).
+    import offense.netns as netns
+    (tmp_path / "scope.txt").write_text("10.10.10.0/24\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    def absent(scope, run=None):
+        raise netns.NetnsError("table absente")
+    monkeypatch.setattr(netns, "verify", absent)
+    out = enter_autonomous_mission({"thread_id": "t_n1"}, {"configurable": {"thread_id": "t_n1"}})
+    assert out.get("finished") is not True
+    assert "[NETNS] Chemin offensif désactivé : table absente" in capsys.readouterr().out
+
+    monkeypatch.setattr(netns, "verify", lambda scope, run=None: None)
+    enter_autonomous_mission({"thread_id": "t_n2"}, {"configurable": {"thread_id": "t_n2"}})
+    assert "[NETNS] Périmètre réseau actif (pc-offense)." in capsys.readouterr().out
+
+
 def test_mission_refusal_clears_stale_active_scope(tmp_path, monkeypatch):
     import scope as scope_mod
     # Un périmètre d'une mission précédente est encore actif dans le processus...

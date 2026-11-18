@@ -3,6 +3,7 @@ import re
 import shutil
 import socket
 import offense.executor
+import offense.netns
 import offense.catalog_author
 from typing import TypedDict, List, Dict, Any, Literal
 from dotenv import load_dotenv
@@ -138,6 +139,7 @@ class MissionState(TypedDict, total=False):
     execution_reports: List[Dict[str, Any]]
     final_response: str
     mission_success: bool
+    netns_missing: bool  # périmètre réseau absent ce cycle : chemin operator/llm non exécutable
 
 
 llm = ChatAnthropic(model="claude-sonnet-4-6")
@@ -372,6 +374,14 @@ def enter_autonomous_mission(state: MissionState, config):
     set_active_scope(scope)
     start_mission(thread_id, scope)
     print(f"[SCOPE] Périmètre chargé : {len(scope.networks)} entrée(s). Mission {thread_id!r} démarrée.")
+    # Périmètre réseau (namespace + nftables) : requis par le chemin offensif
+    # déterministe uniquement. Son absence ne refuse pas la mission — la
+    # reconnaissance et les outils builtin restent utilisables — mais on le dit d'emblée.
+    try:
+        offense.netns.verify(scope)
+        print(f"[NETNS] Périmètre réseau actif ({offense.netns.NS_NAME}).")
+    except offense.netns.NetnsError as exc:
+        print(f"[NETNS] Chemin offensif désactivé : {exc}")
     return {"thread_id": thread_id, "cycle": 0, "max_cycles": state.get("max_cycles", 6),
             "finished": False}
 
@@ -852,9 +862,13 @@ def node_integrate(state: MissionState, config):
             world.mark_technique(report["host"], report["service"], report["technique"],
                                  report.get("inputs_fp", ""), status="tried",
                                  port=int(report.get("port", 0) or 0))
-    # Back-stop R1 : récupère creds/hosts dans les sorties brutes.
+    # Back-stop R1 : récupère creds/hosts dans les sorties brutes. Un blocage
+    # « périmètre réseau absent » n'est pas une sortie d'outil : son message (qui
+    # cite des adresses du périmètre) ne doit pas alimenter le modèle du monde.
     added = 0
     for report in reports:
+        if report.get("status") == "blocked_no_netns":
+            continue
         added += reconcile_evidence(world, report.get("detail", ""))
     cycle = state.get("cycle", 0) + 1
     summary = (f"Mission (cycle {cycle}) : {len(world.in_scope_hosts())} hôte(s) in-scope, "
@@ -867,13 +881,20 @@ def node_integrate(state: MissionState, config):
         hints = " ; ".join(f"{t} (`sudo apt install -y {t}`)" for t in missing)
         summary += ("\n⚠ Techniques en attente d'un outil absent : " + hints +
                     ". Installe-le(s) dans l'environnement (Kali) puis relance la même mission pour les débloquer.")
+    # Escalade « périmètre réseau absent » : même contrat que l'outil manquant —
+    # les techniques operator/llm ne sont PAS marquées (replanifiables après mise
+    # en place du namespace), l'opérateur est prévenu une fois par cycle.
+    netns_blocked = [r for r in reports if r.get("status") == "blocked_no_netns"]
+    if netns_blocked:
+        summary += (f"\n⚠ {len(netns_blocked)} technique(s) en attente du périmètre réseau. "
+                    "Périmètre réseau non en place : lancez « sudo python -m offense.netns up » puis relancez.")
     print(f"[MISSION] Intégration : {summary}")
     # Persistance à chaque cycle : les trouvailles survivent à un crash/interruption.
     try:
         mission_io.save_world(world, thread_id)
     except Exception as e:  # persistance au mieux : ne jamais interrompre la mission
         print(f"[MISSION] avertissement: persistance échouée ({type(e).__name__})")
-    return {"cycle": cycle, "final_response": summary}
+    return {"cycle": cycle, "final_response": summary, "netns_missing": bool(netns_blocked)}
 
 
 def route_after_integrate(state: MissionState) -> Literal["continue", "finish"]:
@@ -890,9 +911,17 @@ def route_after_integrate(state: MissionState) -> Literal["continue", "finish"]:
         # On ne continue QUE s'il reste une tâche réellement EXÉCUTABLE. Les tâches
         # bloquées par un outil absent sont signalées mais ne font pas tourner la
         # boucle à vide jusqu'au cap de cycles (cf. escalade Option Y).
+        # Idem sans périmètre réseau : les techniques operator/llm ne sont pas exécutables.
         cat = _effective_catalog(thread_id)
-        runnable = [t for t in plan_tasks(world, cat)
-                    if technique_available(technique_by_id(cat, t["technique_id"]))]
+        netns_missing = bool(state.get("netns_missing"))
+        runnable = []
+        for t in plan_tasks(world, cat):
+            tech = technique_by_id(cat, t["technique_id"])
+            if not technique_available(tech):
+                continue
+            if netns_missing and tech.provided_by in ("operator", "llm"):
+                continue
+            runnable.append(t)
         if not runnable:
             print("\n[MISSION] Épuisement : plus aucune tâche exécutable in-scope — fin.")
             return "finish"

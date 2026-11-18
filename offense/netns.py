@@ -34,6 +34,11 @@ NFT_SET = "scope4"
 HELPER_PATH = "/usr/local/sbin/pc-netns-exec"
 SUDOERS_PATH = "/etc/sudoers.d/piratecrew"
 
+# Lanceur de processus par défaut. Point d'injection unique : les fonctions
+# prennent `run=None` et retombent dessus, ce qui permet à la suite de tests de
+# le neutraliser d'un coup (conftest) — aucun test unitaire ne lance sudo/ip/nft.
+_spawn = subprocess.run
+
 _LINK_PREFIXLEN = LINK_NET.split("/")[1]
 _RESOLV_PATH = f"/etc/netns/{NS_NAME}/resolv.conf"
 _SUDO_USER_RE = re.compile(r"^[a-z_][a-z0-9_-]*$")
@@ -179,20 +184,22 @@ def _must(run, argv: list[str], stdin: str | None = None) -> None:
         raise NetnsError(f"Échec de : {' '.join(argv)}" + (f" — {detail}" if detail else ""))
 
 
-def down(run=subprocess.run) -> None:
+def down(run=None) -> None:
     """Démonte le namespace et la table nftables. Ne lève jamais."""
+    run = run or _spawn
     for argv in teardown_commands():
         _try(run, argv)
 
 
 def up(scope: Scope, dns: str | None = None, sudo_user: str | None = None,
-       run=subprocess.run, write=_write_root_file) -> None:
+       run=None, write=_write_root_file) -> None:
     """Met en place le namespace filtré pour `scope` (root). Idempotent.
 
     Tout est validé AVANT la première commande. Les règles nftables sont
     chargées avant la création du namespace : il n'existe jamais sans filtre.
     Un échec en cours de route démonte ce qui a été créé puis lève NetnsError.
     """
+    run = run or _spawn
     networks = scope_v4(scope)
     ruleset = nft_ruleset(networks)                       # lève si vide / chevauchement
     resolv = ""
@@ -264,12 +271,13 @@ def _element_networks(elem) -> list[ipaddress.IPv4Network]:
     raise ValueError(f"élément de set inattendu : {elem!r}")
 
 
-def installed_networks(run=subprocess.run) -> list[ipaddress.IPv4Network]:
+def installed_networks(run=None) -> list[ipaddress.IPv4Network]:
     """Réseaux réellement autorisés par le NOYAU (set nftables), fusionnés et triés.
 
     Lit le set via le script d'aide (`--check`). Fail-closed : toute sortie
     absente, illisible ou d'une forme non prévue lève NetnsError — jamais un
     set « supposé conforme »."""
+    run = run or _spawn
     argv = wrap(["--check"])
     try:
         proc = run(argv, capture_output=True, text=True, timeout=10)
@@ -292,7 +300,7 @@ def installed_networks(run=subprocess.run) -> list[ipaddress.IPv4Network]:
     return sorted(ipaddress.collapse_addresses(networks))
 
 
-def verify(scope: Scope, run=subprocess.run) -> None:
+def verify(scope: Scope, run=None) -> None:
     """Lève NetnsError si le set du noyau n'est pas EXACTEMENT le périmètre `scope`."""
     if sys.platform != "linux":
         raise NetnsError("Périmètre réseau indisponible hors Linux (network namespaces).")

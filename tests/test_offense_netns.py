@@ -294,6 +294,17 @@ def test_run_isolated_does_not_run_when_verify_fails(monkeypatch):
     assert ran == []
 
 
+def test_unit_tests_cannot_spawn_real_processes(linux):
+    # Garde-fou de la suite : hors tests d'intégration (marqueur `netns`), le
+    # lanceur par défaut du module est neutralisé par conftest — même sur une
+    # machine Linux, `pytest` ne lance ni sudo, ni ip, ni nft.
+    import subprocess
+    assert netns._spawn is not subprocess.run
+    with pytest.raises(netns.NetnsError):
+        netns.installed_networks()            # lanceur par défaut : refusé, pas de processus
+    netns.down()                              # idem, et ne lève jamais
+
+
 def test_main_status(monkeypatch, capsys, linux):
     monkeypatch.setattr(netns, "installed_networks",
                         lambda run=None: [ipaddress.ip_network("10.0.0.0/24")])
