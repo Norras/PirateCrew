@@ -1,0 +1,22 @@
+# Gabarit OPERATOR du lab PirateCrew — accès authentifié au partage SMB protégé.
+#
+# Ferme la boucle du lab : le mot de passe de « svc-sauvegarde », laissé par l'intranet
+# dans sauvegardes/intranet.conf.bak, ouvre le partage « archives » (refusé en anonyme).
+# C'est l'étape déterministe que l'auteur LLM ne peut pas produire de façon fiable (son
+# gabarit doit rester générique et sans valeur littérale).
+#
+# Pour l'activer — l'arsenal operator reste LOCAL (catalog/operator/*.yaml non versionné) :
+#     cp lab/operator-smb.yaml catalog/operator/smb.yaml
+#
+# La commande s'exécute dans le namespace réseau filtré, en argv (shell=False) : le
+# « % » et le « ! » du couple user%password ne sont pas interprétés par un shell.
+- id: smb.auth_share_archives
+  name: Accès authentifié au partage SMB protégé (archives)
+  domain: ad
+  service: smb
+  requires: [credential]
+  tool: smbclient
+  command_template: "smbclient //{target}/archives -U {user}%{password} -c ls"
+  success_signal: "blocks of size"
+  provided_by: operator
+  opens_session: false

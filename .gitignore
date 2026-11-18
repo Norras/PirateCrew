@@ -32,6 +32,11 @@ audit.log
 # === Missions autonomes (état + artefacts par mission, contient des secrets) ===
 missions/
 
+# === Artefacts déposés dans le cwd par un outil (-o), p.ex. une technique gobuster ===
+# (nom + contenu portent la cible : ne jamais versionner)
+gobuster_*.txt
+ffuf_*.json
+
 # === Editor / IDE ===
 .vscode/
 .idea/

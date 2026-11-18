@@ -52,6 +52,14 @@ def test_build_author_prompt_encadre_le_contexte_et_consigne_les_echecs():
     assert "UN objet JSON" in p             # format de sortie conservé
 
 
+def test_build_author_prompt_annonce_tous_les_champs_remplissables():
+    # Le rendu sait remplir {port} et {password} : l'auteur doit le savoir, sinon il
+    # met un mot de passe dans {hash} et ne peut pas viser un port non standard.
+    p = author.build_author_prompt("smb", "ctx")
+    for field in ("{target}", "{port}", "{user}", "{password}", "{hash}", "{domain}", "{share}"):
+        assert field in p, field
+
+
 class _FakeStore:
     def __init__(self):
         self.calls = []

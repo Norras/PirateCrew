@@ -1,0 +1,6 @@
+Notes de service — Marc (données fictives du lab)
+
+- Migrer l'intranet vers le nouveau serveur avant la fin du mois.
+- Le partage \\192.0.2.2\archives contient encore les exports de la compta : à trier.
+- Le compte svc-sauvegarde sert à la sauvegarde nocturne, sa configuration est dans sauvegardes/.
+- Rappeler à Jean de ne plus déposer de mots de passe dans le partage public.

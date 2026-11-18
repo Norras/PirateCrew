@@ -106,6 +106,29 @@ la machine) et le chemin offensif (depuis `pc-offense`, à travers le filtre) at
 deux `192.0.2.2` ; les services locaux de la machine restent hors d'atteinte du chemin
 offensif. Le lab ne sépare que le réseau du service, pas ses fichiers.
 
+##### Lab garni (prêt à l'emploi)
+
+`lab/demarrer.sh` monte la cible et y lance **deux services remplis de données fictives** :
+un intranet HTTP (port 80) et un serveur de fichiers SMB (port 445), le tout au premier plan
+(Ctrl-C arrête et démonte) :
+
+```bash
+sudo bash lab/demarrer.sh
+# puis, dans un autre terminal : 192.0.2.2 dans scope.txt, puis sudo python -m offense.netns up
+```
+
+L'intranet laisse traîner le mot de passe d'un compte de service qui ouvre un partage SMB
+protégé (`archives`, refusé en anonyme). Pour que le chaînage « mot de passe trouvé → accès
+au partage » s'exécute de façon déterministe, copiez le gabarit `operator` fourni (l'arsenal
+`operator` reste local, non versionné) :
+
+```bash
+cp lab/operator-smb.yaml catalog/operator/smb.yaml
+```
+
+Une mission `scanne et énumère 192.0.2.2` enchaîne alors : recon → lecture de l'intranet →
+récupération du mot de passe → listing authentifié du partage `archives`.
+
 Limites connues :
 
 - rebond par un hôte in-scope (`curl -x` vers un proxy du périmètre) ;
@@ -312,7 +335,7 @@ docs/                  # rapports & suivi (MILESTONES, RAPPORT-AVANCEMENT)
 
 ## État du projet
 
-Prototype **fonctionnel et couvert par les tests** (52 tests verts), pas encore durci
+Prototype **fonctionnel et couvert par les tests** (274 tests verts), pas encore durci
 pour une mise en production. Dépend d'une clé API LLM et, pour le scan complet, d'outils
 système optionnels (repli en Python pur sinon). Suivi de l'avancement :
 [`docs/MILESTONES.md`](docs/MILESTONES.md).

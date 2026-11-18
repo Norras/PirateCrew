@@ -1,0 +1,7 @@
+Bienvenue sur le partage public du Comptoir des Sept Mers (société fictive du lab).
+
+Dossiers :
+  Procedures/   procédures internes
+  Inventaire/   parc informatique
+
+Les exports comptables sont dans le partage « archives ».

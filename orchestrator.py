@@ -11,7 +11,7 @@ from langchain_anthropic import ChatAnthropic
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
 
-from scope import load_scope, set_active_scope, ScopeError
+from scope import load_scope, set_active_scope, ScopeError, _audit as _audit_event
 from state.world_model import WorldModel, Credential, Session, inputs_fingerprint
 from state import mission_io
 from catalog import load_catalog, techniques_for, technique_by_id
@@ -515,9 +515,21 @@ _IPV4_RE = re.compile(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b")
 # qui en porte un, sinon « Server:nginx » / « Host:10.0.0.1 » fabriquent de faux
 # secrets qui débloqueraient à tort des techniques requires={credential}.
 _CRED_CUE_RE = re.compile(
-    r"\b(cred|creds|credential|credentials|password|passwd|pwd|login|logon|secret|hash|ntlm|kerb)\b",
+    r"\b(cred|creds|credential|credentials|password|passwd|pwd|login|logon|secret|hash|ntlm|kerb"
+    r"|mot de passe|mot_de_passe|mdp|identifiant|identifiants)\b",
     re.IGNORECASE,
 )
+# Forme « clé = valeur » / « clé: valeur » (ini, .env, YAML, JSON) : un mot de passe
+# n'est retenu que s'il a un identifiant à au plus _KV_WINDOW lignes.
+_KV_RE = re.compile(r"""^\s*["']?([A-Za-z][\w.\-]{0,63})["']?\s*[=:]\s*(.*?)\s*$""")
+_KV_WINDOW = 3
+_KV_USER_KEYS = {"user", "username", "user_name", "login", "utilisateur", "identifiant",
+                 "account", "compte"}
+_KV_USER_SUFFIXES = ("_user", "_username", "_login", "_utilisateur")
+_KV_PASS_KEYS = {"password", "passwd", "pass", "pwd", "mot_de_passe", "motdepasse", "mdp",
+                 "secret"}
+_KV_PASS_SUFFIXES = ("_password", "_passwd", "_pass", "_pwd", "_mdp", "_mot_de_passe")
+_KV_USER_VALUE = re.compile(r"[A-Za-z0-9][\w.@\\\-]{0,63}")
 # Noms d'en-têtes/étiquettes à ne JAMAIS prendre pour un principal de credential.
 # La fenêtre d'indice (cue + 2 lignes) peut survoler un « Server:nginx » /
 # « Host:10.0.0.1 » compact : ce sont de la prose structurée, pas des identifiants.
@@ -528,7 +540,51 @@ _NON_CRED_PRINCIPALS = {
     "x-frame-options", "last-modified", "accept-ranges", "keep-alive",
     "www-authenticate", "user-agent", "referer", "via", "upgrade", "allow",
     "pragma", "expires", "strict-transport-security",
+    # Noms de clé : « password:hunter2 » n'a pas « password » pour identifiant.
+    "password", "passwd", "pass", "pwd", "secret", "mot_de_passe", "mdp",
+    "user", "username", "login", "utilisateur", "identifiant",
 }
+
+
+def _kv_clean(value: str) -> str:
+    """Valeur brute d'une ligne « clé = valeur » : virgule finale et guillemets retirés."""
+    v = value.rstrip(",;").strip()
+    if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+        v = v[1:-1]
+    return v
+
+
+def _kv_is_secret(value: str) -> bool:
+    """Vrai si `value` ressemble à un vrai secret, pas à un gabarit/masque/vide."""
+    if not 3 <= len(value) <= 128 or any(c.isspace() for c in value):
+        return False
+    if value.startswith(("$", "{", "<", "%")) or set(value) <= {"*", "x", "X"}:
+        return False
+    return value.lower() not in {"none", "null", "nil", "undefined", "true", "false"}
+
+
+def _kv_credentials(lines: List[str]) -> List[tuple]:
+    """Paires (identifiant, secret) des lignes « clé = valeur » : chaque mot de passe
+    est associé à l'identifiant le plus proche à au plus _KV_WINDOW lignes. Pur."""
+    users, secrets = [], []
+    for i, line in enumerate(lines):
+        m = _KV_RE.match(line)
+        if not m:
+            continue
+        key = m.group(1).lower().replace("-", "_").replace(".", "_")
+        value = _kv_clean(m.group(2))
+        if key in _KV_PASS_KEYS or key.endswith(_KV_PASS_SUFFIXES):
+            if _kv_is_secret(value):
+                secrets.append((i, value))
+        elif key in _KV_USER_KEYS or key.endswith(_KV_USER_SUFFIXES):
+            if _KV_USER_VALUE.fullmatch(value):
+                users.append((i, value))
+    out = []
+    for i, secret in secrets:
+        near = [(abs(j - i), user) for j, user in users if abs(j - i) <= _KV_WINDOW]
+        if near:
+            out.append((min(near)[1], secret))
+    return out
 
 
 def reconcile_evidence(world: WorldModel, raw_text: str) -> int:
@@ -555,6 +611,12 @@ def reconcile_evidence(world: WorldModel, raw_text: str) -> int:
                                                 secret=secret, source="evidence-reconcile"))
                 if len(world.credentials) > before:
                     added += 1
+    for principal, secret in _kv_credentials(lines):
+        before = len(world.credentials)
+        world.add_credential(Credential(kind="password", principal=principal,
+                                        secret=secret, source="evidence-reconcile"))
+        if len(world.credentials) > before:
+            added += 1
     for m in _IPV4_RE.finditer(text):
         ip = m.group(1)
         if ip not in world.hosts:
@@ -656,6 +718,8 @@ def node_recon(state: MissionState, config):
                          default_workers=workers)
     _found = [f"{s.host}:{s.port}/{s.name or '?'}" for h in world.in_scope_hosts() for s in h.services]
     _vprint(f"Services in-scope après découverte ({len(_found)}) : {_found or 'AUCUN'}")
+    _audit_event("RECON", f"{target} cycle {state.get('cycle', 0)}: {len(ports)} port(s) sondé(s), "
+                 f"{len(_found)} service(s) in-scope: " + (", ".join(_found) if _found else "aucun"))
     ctx = (f"OBJECTIF: reconnaître {target}. Pour CHAQUE service ouvert, appelle "
            f"report_finding(kind='service', host='{target}', service=<nom>, port=<port>).")
     agent = build_task_agent("network", world, ctx)
@@ -698,9 +762,15 @@ def _dry_services(world: WorldModel, catalog, planned) -> List[str]:
 
 
 def _already_authored(world: WorldModel, service: str) -> bool:
-    """Vrai si l'auteur LLM a déjà rédigé une technique pour ce service (une fois par mission)."""
-    return any(e.get("kind") == "llm_technique" and e.get("service") == service
-               for e in world.evidence)
+    """Vrai si l'auteur LLM a déjà été sollicité pour ce service, qu'il ait produit
+    une technique ou non (une tentative par service et par mission)."""
+    return any(e.get("kind") in ("llm_technique", "llm_author_attempt")
+               and e.get("service") == service for e in world.evidence)
+
+
+def _authorable_services(world: WorldModel, catalog) -> List[str]:
+    """Services épuisés que l'auteur LLM n'a pas encore traités dans cette mission."""
+    return [s for s in _dry_services(world, catalog, []) if not _already_authored(world, s)]
 
 
 def _redact(text: str, secrets) -> str:
@@ -727,7 +797,35 @@ def _execute_excerpt(world: WorldModel, tech_id: str, host: str,
     return cleaned[:limit]
 
 
-def _author_context(world: WorldModel, service: str) -> str:
+_RAG_AUTHOR_K = 4
+_RAG_AUTHOR_EXCERPT = 500
+
+
+def _rag_for_author(service: str, search=None) -> str:
+    """Extraits du RAG (notes de l'opérateur + techniques promues) utiles à l'auteur
+    LLM pour `service`. Chaque extrait est borné ; la source est signalée. Ne lève
+    jamais : RAG indisponible ou vide → chaîne vide (l'auteur travaille sans)."""
+    try:
+        if search is None:
+            from agents.pirate_agent import vectorstore
+            search = lambda q, k: vectorstore.similarity_search(q, k=k)  # noqa: E731
+        docs = search(f"Techniques d'énumération et d'attaque autorisées pour le service {service}",
+                      _RAG_AUTHOR_K) or []
+        parts = []
+        for d in docs:
+            text = " ".join(str(getattr(d, "page_content", "") or "").split())
+            if not text:
+                continue
+            meta = getattr(d, "metadata", None) or {}
+            label = "technique promue" if meta.get("source") == "llm_authored" else "note"
+            parts.append(f"- ({label}) {text[:_RAG_AUTHOR_EXCERPT]}")
+        return "\n".join(parts)
+    except Exception as exc:  # noqa: BLE001 - best-effort, jamais bloquant
+        _vprint(f"RAG indisponible pour l'auteur : {type(exc).__name__}")
+        return ""
+
+
+def _author_context(world: WorldModel, service: str, extra: str = "") -> str:
     """Contexte réel de la mission pour l'auteur LLM d'une technique sur `service`.
 
     Assemble depuis le WorldModel : version(s)/port(s) du service visé sur les
@@ -763,6 +861,9 @@ def _author_context(world: WorldModel, service: str) -> str:
         lines.append("Déjà tenté (NE PAS reproposer) :\n- " + "\n- ".join(tried))
     else:
         lines.append("Aucune technique encore tentée pour ce service.")
+    if extra:
+        lines.append("Connaissances (RAG : notes de l'opérateur et techniques déjà promues, "
+                     "à adapter — ne recopie aucune valeur littérale) :\n" + extra)
     return "\n".join(lines)
 
 
@@ -775,8 +876,9 @@ def node_decide(state: MissionState, config):
         for svc in _dry_services(world, _effective_catalog(thread_id), tasks):
             if _already_authored(world, svc):
                 continue
+            world.add_evidence({"kind": "llm_author_attempt", "service": svc})
             tech = offense.catalog_author.author_technique(
-                svc, _author_context(world, svc),
+                svc, _author_context(world, svc, extra=_rag_for_author(svc)),
                 lambda p: author_llm.invoke(p).content)
             if tech:
                 _MISSION_CATALOG.setdefault(thread_id, []).append(tech)
@@ -785,6 +887,7 @@ def node_decide(state: MissionState, config):
                 except Exception as exc:  # noqa: BLE001 - best-effort
                     _vprint(f"Persistance technique LLM échouée : {type(exc).__name__}")
                 world.add_evidence({"kind": "llm_technique", "service": svc, "id": tech.id})
+                _audit_event("AUTHORED", f"{svc}: {tech.id} (tool={tech.tool or '-'})")
                 authored = True
         if authored:
             tasks = plan_tasks(world, _effective_catalog(thread_id))
@@ -800,6 +903,9 @@ def node_decide(state: MissionState, config):
             rag = "\n\n---\n\n".join(d.page_content for d in docs)
         except Exception as exc:  # noqa: BLE001
             rag = f"(RAG indisponible : {type(exc).__name__})"
+    _audit_event("DECIDE", f"cycle {state.get('cycle', 0)}: {len(tasks)} tâche(s): "
+                 + (", ".join(f"{t['technique_id']}@{t['host']}:{t.get('port', 0)}" for t in tasks)
+                    if tasks else "aucune"))
     print(f"[MISSION] Décision : {len(tasks)} tâche(s) planifiée(s) pour ce cycle.")
     return {"planned": tasks, "rag_context": rag}
 
@@ -892,13 +998,19 @@ def node_execute(state: MissionState, config):
         try:
             result = agent.invoke({"messages": [("user", query)]})
             raw = result["messages"][-1].content
+            # Ce que les outils ont réellement renvoyé (le résumé du LLM peut omettre
+            # le contenu lu) : alimente le rattrapage de trouvailles de node_integrate.
+            tool_output = "\n".join(str(m.content) for m in result["messages"]
+                                    if getattr(m, "type", "") == "tool")
             status = "done"
         except Exception as exc:  # noqa: BLE001
             raw = f"{type(exc).__name__}: {exc}"
+            tool_output = ""
             status = "error"
         world.add_evidence({"phase": "execute", "technique": tech.id, "host": task["host"], "raw": raw})
         reports.append({"technique": tech.id, "host": task["host"], "service": task["service"],
-                        "port": port, "inputs_fp": inputs_fp, "status": status, "detail": raw})
+                        "port": port, "inputs_fp": inputs_fp, "status": status, "detail": raw,
+                        "tool_output": tool_output})
     return {"execution_reports": reports}
 
 
@@ -925,6 +1037,8 @@ def node_integrate(state: MissionState, config):
         if report.get("status") == "blocked_no_netns":
             continue
         added += reconcile_evidence(world, report.get("detail", ""))
+        if report.get("tool_output"):
+            added += reconcile_evidence(world, report["tool_output"])
     cycle = state.get("cycle", 0) + 1
     summary = (f"Mission (cycle {cycle}) : {len(world.in_scope_hosts())} hôte(s) in-scope, "
                f"{len(world.credentials)} credential(s), {len(world.sessions)} session(s), "
@@ -976,8 +1090,15 @@ def route_after_integrate(state: MissionState) -> Literal["continue", "finish"]:
                 continue
             if netns_missing and tech.provided_by in ("operator", "llm"):
                 continue
+            if is_propose_only() and tech.provided_by == "llm":
+                continue                      # proposée, jamais exécutée : ne fait pas boucler
             runnable.append(t)
         if not runnable:
+            # Catalogue épuisé sur un service : decide doit encore passer la main à
+            # l'auteur LLM (une fois par service), sauf si rien de ce qu'il écrirait
+            # ne pourrait s'exécuter (périmètre réseau absent).
+            if not netns_missing and _authorable_services(world, cat):
+                return "continue"
             print("\n[MISSION] Épuisement : plus aucune tâche exécutable in-scope — fin.")
             return "finish"
     return "continue"

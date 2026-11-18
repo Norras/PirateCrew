@@ -1,0 +1,4 @@
+# Scripts et configs exécutés sous Linux : fins de ligne LF quel que soit l'OS de
+# checkout (un CRLF casse le shebang bash et les valeurs de config).
+*.sh text eol=lf
+lab/smb.conf.modele text eol=lf
