@@ -80,6 +80,13 @@ sudo python -m offense.netns down
   `net.ipv4.ip_forward`, que `down` ne remet pas à zéro.
 - **DNS fermé par défaut** dans le namespace (`/etc/hosts` reste visible) ; services de la
   machine elle-même (loopback, IP locales) injoignables ; IPv6 désactivé.
+- **Un périmètre `127.0.0.1` est donc injoignable par ce chemin** : dans le namespace, la
+  boucle locale est celle du namespace, vide. `up` et la porte de mission l'annoncent
+  (`[NETNS] Attention : …`). La reconnaissance et les outils builtin, eux, atteignent
+  toujours `127.0.0.1`. Pour un lab local, donnez à la cible sa propre adresse (conteneur,
+  VM, autre namespace) et mettez cette adresse dans `scope.txt`.
+- Le lien interne hôte ↔ namespace utilise `100.127.77.0/30` (plage partagée des
+  opérateurs, hors plages privées) : seul un périmètre qui chevauche cette plage est refusé.
 
 Limites connues :
 
@@ -152,6 +159,25 @@ Vous > scanne et énumère 10.10.10.5
 Le superviseur reconnaît une mission autonome, charge le périmètre, puis déroule la
 boucle. La réponse finale résume les trouvailles (hôtes, services, identifiants…) et
 **signale tout outil manquant** à installer.
+
+Commandes de l'invite (en plus du langage naturel) :
+
+| Commande | Effet |
+|---|---|
+| `verbose [on\|off]` | diagnostics détaillés (aussi : `PIRATECREW_VERBOSE=1`) |
+| `propose-only [on\|off]` | les techniques rédigées par l'auteur LLM sont montrées, pas exécutées |
+| `sessions` | sessions obtenues pendant la dernière mission, autorisées ou en attente |
+| `authorize <hôte>` | autorise les sessions en attente de cet hôte et reprend la mission |
+| `promote` | ajoute au RAG partagé les techniques LLM proposées en fin de mission |
+| `exit` / `quit` | quitter |
+
+Rien n'est écrit d'office dans le RAG partagé : en fin de mission, les techniques rédigées
+par l'auteur LLM sont **affichées** telles qu'elles seraient stockées, et seule la commande
+`promote` les y ajoute. Le filtre automatique (secrets, identifiants et noms d'hôte connus,
+IP, jetons à forte entropie) n'est qu'un pré-tri : relisez avant de promouvoir.
+
+Les résultats détaillés sont dans `missions/<id>/rapport.md` (rapport lisible) et
+`missions/<id>/world.json` (état complet, réécrit à chaque cycle).
 
 ## Comment ça marche
 

@@ -48,6 +48,16 @@ def test_link_stays_out_of_private_ranges(private):
     assert ipaddress.ip_address(netns.HOST_ADDR) in link and ipaddress.ip_address(netns.NS_ADDR) in link
 
 
+def test_loopback_entries_are_reported():
+    # Une entrée 127.x du périmètre est injoignable depuis le namespace (il a sa
+    # propre boucle locale) : on sait la désigner pour prévenir l'opérateur.
+    s = Scope.from_lines(["127.0.0.1", "10.0.0.0/24", "127.8.0.0/16"])
+    assert netns.loopback_entries(s) == ["127.0.0.1/32", "127.8.0.0/16"]
+    assert "127.0.0.1/32" in netns.loopback_warning(s) and "boucle locale" in netns.loopback_warning(s)
+    other = Scope.from_lines(["10.0.0.0/24"])
+    assert netns.loopback_entries(other) == [] and netns.loopback_warning(other) is None
+
+
 def test_setup_orders_and_disables_v6():
     cmds = netns.setup_commands()
     assert cmds[0] == ["ip", "netns", "add", "pc-offense"]

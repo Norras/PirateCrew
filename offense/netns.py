@@ -110,6 +110,26 @@ def scope_v4(scope: Scope) -> list[ipaddress.IPv4Network]:
     return sorted(ipaddress.collapse_addresses(v4))
 
 
+_LOOPBACK = ipaddress.ip_network("127.0.0.0/8")
+
+
+def loopback_entries(scope: Scope) -> list[str]:
+    """Entrées IPv4 du périmètre situées dans 127.0.0.0/8. Depuis le namespace,
+    ces adresses désignent SA boucle locale (vide), pas celle de la machine : le
+    chemin offensif ne peut pas y joindre les services locaux de l'hôte."""
+    return [str(n) for n in scope_v4(scope) if n.overlaps(_LOOPBACK)]
+
+
+def loopback_warning(scope: Scope) -> str | None:
+    """Avertissement à afficher si le périmètre contient la boucle locale, sinon None."""
+    entries = loopback_entries(scope)
+    if not entries:
+        return None
+    return (f"[NETNS] Attention : {', '.join(entries)} désigne la boucle locale. Dans le "
+            "namespace, c'est celle du namespace (vide) et non celle de cette machine : "
+            "le chemin offensif ne peut pas joindre ses services locaux.")
+
+
 def _element(net: ipaddress.IPv4Network) -> str:
     return str(net.network_address) if net.prefixlen == 32 else str(net)
 
@@ -428,6 +448,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     print(f"[NETNS] Namespace {NS_NAME} en place — sorties autorisées : "
           f"{', '.join(str(n) for n in scope_v4(scope))}")
+    warning = loopback_warning(scope)
+    if warning:
+        print(warning)
     return 0
 
 

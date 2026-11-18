@@ -1,4 +1,7 @@
 import json
+
+import pytest
+
 import offense.catalog_author as author
 
 _GOOD = json.dumps({"id":"llm.smb.cme","name":"CME","domain":"ad","service":"smb",
@@ -67,6 +70,70 @@ def test_promote_techniques_to_rag_add_texts_et_ids_stables():
     # idempotence inter-missions : même contenu -> même id (upsert, pas de doublon)
     author.promote_techniques_to_rag([t], "mission-2", store=s)
     assert s.calls[1][2] == ids
+
+
+_BASE = {"id": "llm.probe", "name": "n", "domain": "web", "requires": [], "tool": "echo",
+         "command_template": "echo {target}", "success_signal": "ok", "opens_session": False}
+
+
+def test_author_accepts_the_well_typed_baseline():
+    assert author.author_technique("http", "ctx", llm_invoke=lambda p: json.dumps(_BASE)) is not None
+
+
+@pytest.mark.parametrize("bad", [
+    {"command_template": ["echo", "{target}"]},   # liste : faisait lever author_technique
+    {"id": {"a": 1}},                              # non hachable : empoisonnait le catalogue de mission
+    {"id": ["a"]},
+    {"id": ""},
+    {"id": "../../ailleurs"},
+    {"tool": ["echo"]},
+    {"name": {"x": 1}},
+    {"success_signal": ["ok"]},
+    {"requires": [1, 2]},
+    {"requires": {"session": True}},
+    {"opens_session": "oui"},
+])
+def test_author_rejects_ill_typed_fields(bad):
+    # Une proposition mal typée est REJETÉE (None) — jamais d'exception qui
+    # interromprait la mission, jamais d'entrée inutilisable dans le catalogue.
+    raw = json.dumps({**_BASE, **bad})
+    assert author.author_technique("http", "ctx", llm_invoke=lambda p: raw) is None
+
+
+def test_author_survives_a_failing_llm_call():
+    def down(_prompt):
+        raise ConnectionError("API indisponible")
+    assert author.author_technique("http", "ctx", llm_invoke=down) is None
+
+
+def _tech(**over):
+    from catalog.loader import Technique
+    base = dict(id="llm.t", name="x", domain="recon", service="smb", requires=set(), tool="nmap",
+                command_template="nmap -sV -p 445 {target}", success_signal="ok", provided_by="llm")
+    return Technique(**{**base, **over})
+
+
+def test_promote_isolates_a_malformed_technique():
+    # Une technique illisible est écartée seule : elle ne fait plus lever, ni
+    # perdre tout le lot.
+    s = _FakeStore()
+    assert author.promote_techniques_to_rag([_tech(command_template=None), _tech()], "m", store=s) == 1
+    assert len(s.calls[0][0]) == 1
+
+
+def test_promote_dedupes_identical_templates_in_one_batch():
+    s = _FakeStore()
+    assert author.promote_techniques_to_rag([_tech(id="llm.a"), _tech(id="llm.b")], "m", store=s) == 1
+    assert s.calls[0][2] == list(dict.fromkeys(s.calls[0][2])) and len(s.calls[0][2]) == 1
+
+
+def test_rag_candidates_expose_exactly_what_would_be_stored():
+    cands = author.rag_candidates([_tech(), _tech(command_template="nmap -p 445 192.0.2.10")])
+    assert len(cands) == 1                                   # l'IP littérale écarte la seconde
+    assert cands[0]["text"].startswith("Technique « x » pour le service smb")
+    assert cands[0]["id"].startswith("llm:") and cands[0]["metadata"]["tool"] == "nmap"
+    s = _FakeStore()
+    assert author.store_candidates(cands, store=s) == 1 and s.calls[0][0] == [cands[0]["text"]]
 
 
 def test_promote_techniques_to_rag_vide_est_noop():
