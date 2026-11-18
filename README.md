@@ -295,7 +295,6 @@ mission. L'humain reste maître des capacités installées.
 Sous Windows, le plus simple pour disposer d'un vrai arsenal (`nmap`, `smbclient`,
 `gobuster`…) est de faire tourner PirateCrew dans **WSL2 Kali**. Les agents détectent et
 utilisent alors les binaires présents ; ceux qui manquent sont signalés (voir ci-dessus).
-Étapes détaillées : [`docs/MILESTONES.md`](docs/MILESTONES.md).
 
 C'est aussi là que fonctionne le [périmètre réseau](#périmètre-réseau-chemin-offensif)
 (namespaces + nftables, vérifié sur le noyau WSL2) : sans lui, les techniques
@@ -342,12 +341,11 @@ catalog/
   builtin/             # techniques fournies (recon / web / smb)
   operator/            # techniques locales de l'opérateur (non versionné)
 tests/                 # suite pytest
-docs/                  # rapports & suivi (MILESTONES, RAPPORT-AVANCEMENT)
+scripts/               # utilitaires ponctuels (inspection de la base RAG)
 ```
 
 ## État du projet
 
 Prototype **fonctionnel et couvert par les tests** (274 tests verts), pas encore durci
 pour une mise en production. Dépend d'une clé API LLM et, pour le scan complet, d'outils
-système optionnels (repli en Python pur sinon). Suivi de l'avancement :
-[`docs/MILESTONES.md`](docs/MILESTONES.md).
+système optionnels (repli en Python pur sinon).
