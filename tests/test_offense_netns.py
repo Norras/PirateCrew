@@ -179,3 +179,129 @@ def test_main_requires_root_and_linux(monkeypatch):
     monkeypatch.setattr(netns.sys, "platform", "linux")
     monkeypatch.setattr(netns.os, "geteuid", lambda: 1000, raising=False)
     assert netns.main(["up"]) == 2
+
+
+# --------------------------------------------------------------------------- #
+# Task 3 : entrée dans le namespace et vérification contre le noyau
+# --------------------------------------------------------------------------- #
+# Forme réelle de `nft -j list set` (nftables 1.1.6) : /32 en chaîne, CIDR en
+# {"prefix"}, intervalle non aligné en {"range"}.
+NFT_JSON = ('{"nftables":[{"metainfo":{"version":"1.1.6"}},{"set":{"family":"inet","name":"scope4",'
+            '"table":"piratecrew","type":"ipv4_addr","flags":["interval"],"elem":['
+            '"10.10.10.5",{"prefix":{"addr":"10.0.0.0","len":24}},{"range":["10.0.1.0","10.0.1.255"]}]}}]}')
+
+
+@pytest.fixture
+def linux(monkeypatch):
+    monkeypatch.setattr(netns.sys, "platform", "linux")
+
+
+def _run_json(out, returncode=0):
+    return _FakeRun(stdout=out, returncode=returncode)
+
+
+def test_installed_networks_parses_three_element_forms(linux):
+    run = _run_json(NFT_JSON)
+    nets = netns.installed_networks(run=run)
+    assert [str(n) for n in nets] == ["10.0.0.0/23", "10.10.10.5/32"]
+    assert run.calls[0][0][-2:] == ["/usr/local/sbin/pc-netns-exec", "--check"]
+
+
+def test_installed_networks_empty_set_is_empty_list(linux):
+    out = '{"nftables":[{"set":{"name":"scope4","table":"piratecrew"}}]}'
+    assert netns.installed_networks(run=_run_json(out)) == []
+
+
+@pytest.mark.parametrize("out", [
+    "", "pas du json", "{}", '{"nftables":[{"metainfo":{}}]}',
+    '{"nftables":[{"set":{"elem":[{"weird":1}]}}]}',
+    '{"nftables":[{"set":{"elem":["pas-une-ip"]}}]}',
+    '{"nftables":[{"set":{"elem":[{"prefix":{"addr":"10.0.0.0"}}]}}]}',
+])
+def test_installed_networks_fail_closed_on_unexpected_output(linux, out):
+    with pytest.raises(netns.NetnsError):
+        netns.installed_networks(run=_run_json(out))
+
+
+def test_installed_networks_fail_closed_on_helper_failure(linux):
+    import subprocess
+    with pytest.raises(netns.NetnsError):
+        netns.installed_networks(run=_run_json(NFT_JSON, returncode=97))
+
+    def missing(argv, **kwargs):
+        raise FileNotFoundError("sudo")
+    with pytest.raises(netns.NetnsError):
+        netns.installed_networks(run=missing)
+
+    def slow(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, 10)
+    with pytest.raises(netns.NetnsError):
+        netns.installed_networks(run=slow)
+
+
+def test_verify_exact_match_only(linux):
+    run = _run_json(NFT_JSON)
+    netns.verify(Scope.from_lines(["10.0.0.0/23", "10.10.10.5"]), run=run)       # ne lève pas
+    for lines in (["10.0.0.0/23"], ["10.0.0.0/23", "10.10.10.5", "10.9.9.9"], ["10.0.0.0/22", "10.10.10.5"]):
+        with pytest.raises(netns.NetnsError, match="offense.netns up"):
+            netns.verify(Scope.from_lines(lines), run=run)
+
+
+def test_verify_refuses_scope_without_ipv4(linux):
+    empty_set = '{"nftables":[{"set":{"name":"scope4","table":"piratecrew"}}]}'
+    with pytest.raises(netns.NetnsError):
+        netns.verify(Scope.from_lines(["fd00::/8"]), run=_run_json(empty_set))
+
+
+def test_verify_refuses_off_linux_without_spawning(monkeypatch):
+    monkeypatch.setattr(netns.sys, "platform", "win32")
+    run = _run_json(NFT_JSON)
+    with pytest.raises(netns.NetnsError):
+        netns.verify(Scope.from_lines(["10.0.0.0/23", "10.10.10.5"]), run=run)
+    assert run.calls == []
+
+
+def test_wrap_by_euid(monkeypatch):
+    monkeypatch.setattr(netns.os, "geteuid", lambda: 1000, raising=False)
+    assert netns.wrap(["nmap", "x"]) == ["sudo", "-n", "/usr/local/sbin/pc-netns-exec", "nmap", "x"]
+    monkeypatch.setattr(netns.os, "geteuid", lambda: 0, raising=False)
+    assert netns.wrap(["nmap", "x"]) == ["/usr/local/sbin/pc-netns-exec", "nmap", "x"]
+
+
+def test_run_isolated_requires_scope_and_verify(monkeypatch):
+    from scope import set_active_scope
+    with pytest.raises(netns.NetnsError):
+        netns.run_isolated(["id"])                                   # aucun périmètre actif
+    seen = []
+    set_active_scope(Scope.from_lines(["10.0.0.0/24"]))
+    monkeypatch.setattr(netns, "verify", lambda scope, run=None: None)
+    monkeypatch.setattr(netns, "wrap", lambda argv: ["W", *argv])
+    monkeypatch.setattr("tools.registry._run", lambda argv, timeout=120: seen.append((argv, timeout)) or "ok")
+    assert netns.run_isolated(["id"], timeout=7) == "ok" and seen == [(["W", "id"], 7)]
+
+
+def test_run_isolated_does_not_run_when_verify_fails(monkeypatch):
+    from scope import set_active_scope
+    set_active_scope(Scope.from_lines(["10.0.0.0/24"]))
+    ran = []
+
+    def refuse(scope, run=None):
+        raise netns.NetnsError("set différent")
+    monkeypatch.setattr(netns, "verify", refuse)
+    monkeypatch.setattr("tools.registry._run", lambda argv, timeout=120: ran.append(argv) or "ok")
+    with pytest.raises(netns.NetnsError):
+        netns.run_isolated(["id"])
+    assert ran == []
+
+
+def test_main_status(monkeypatch, capsys, linux):
+    monkeypatch.setattr(netns, "installed_networks",
+                        lambda run=None: [ipaddress.ip_network("10.0.0.0/24")])
+    assert netns.main(["status"]) == 0
+    assert "10.0.0.0/24" in capsys.readouterr().out
+
+    def absent(run=None):
+        raise netns.NetnsError("table absente")
+    monkeypatch.setattr(netns, "installed_networks", absent)
+    assert netns.main(["status"]) == 1
+    assert "absent" in capsys.readouterr().out

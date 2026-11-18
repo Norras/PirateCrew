@@ -15,12 +15,13 @@ toute modification de scope.txt.
 """
 import argparse
 import ipaddress
+import json
 import os
 import re
 import subprocess
 import sys
 
-from scope import Scope, ScopeError, load_scope
+from scope import Scope, ScopeError, get_active_scope, load_scope
 
 NS_NAME = "pc-offense"
 HOST_IF = "pc-host"
@@ -232,12 +233,103 @@ def up(scope: Scope, dns: str | None = None, sudo_user: str | None = None,
         raise
 
 
+# --------------------------------------------------------------------------- #
+# Entrée dans le namespace et vérification (processus PirateCrew, non root)
+# --------------------------------------------------------------------------- #
+_UP_HINT = "lancez « sudo python -m offense.netns up » puis relancez"
+
+
+def _is_root() -> bool:
+    return getattr(os, "geteuid", lambda: -1)() == 0
+
+
+def wrap(argv: list[str]) -> list[str]:
+    """Préfixe `argv` pour l'exécuter dans le namespace via le script d'aide
+    (`sudo -n` si le processus n'est pas root : jamais de demande de mot de passe)."""
+    prefix = [] if _is_root() else ["sudo", "-n"]
+    return [*prefix, HELPER_PATH, *argv]
+
+
+def _element_networks(elem) -> list[ipaddress.IPv4Network]:
+    """Réseaux d'un élément de set nftables (JSON). Forme inconnue -> ValueError."""
+    if isinstance(elem, str):
+        return [ipaddress.IPv4Network(elem)]
+    if isinstance(elem, dict) and set(elem) == {"prefix"}:
+        prefix = elem["prefix"]
+        return [ipaddress.IPv4Network(f"{prefix['addr']}/{prefix['len']}")]
+    if isinstance(elem, dict) and set(elem) == {"range"}:
+        first, last = elem["range"]
+        return list(ipaddress.summarize_address_range(
+            ipaddress.IPv4Address(first), ipaddress.IPv4Address(last)))
+    raise ValueError(f"élément de set inattendu : {elem!r}")
+
+
+def installed_networks(run=subprocess.run) -> list[ipaddress.IPv4Network]:
+    """Réseaux réellement autorisés par le NOYAU (set nftables), fusionnés et triés.
+
+    Lit le set via le script d'aide (`--check`). Fail-closed : toute sortie
+    absente, illisible ou d'une forme non prévue lève NetnsError — jamais un
+    set « supposé conforme »."""
+    argv = wrap(["--check"])
+    try:
+        proc = run(argv, capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise NetnsError(f"Périmètre réseau illisible ({type(exc).__name__}: {exc})") from exc
+    if proc.returncode != 0:
+        detail = (proc.stderr or "").strip()
+        raise NetnsError(f"Périmètre réseau absent (code {proc.returncode})"
+                         + (f" — {detail}" if detail else ""))
+    try:
+        data = json.loads(proc.stdout)
+        sets = [obj["set"] for obj in data["nftables"] if isinstance(obj, dict) and "set" in obj]
+        if len(sets) != 1:
+            raise ValueError(f"{len(sets)} set(s) dans la sortie nft")
+        networks: list[ipaddress.IPv4Network] = []
+        for elem in sets[0].get("elem", []):
+            networks.extend(_element_networks(elem))
+    except (ValueError, KeyError, TypeError) as exc:
+        raise NetnsError(f"Sortie nft inattendue ({exc})") from exc
+    return sorted(ipaddress.collapse_addresses(networks))
+
+
+def verify(scope: Scope, run=subprocess.run) -> None:
+    """Lève NetnsError si le set du noyau n'est pas EXACTEMENT le périmètre `scope`."""
+    if sys.platform != "linux":
+        raise NetnsError("Périmètre réseau indisponible hors Linux (network namespaces).")
+    expected = scope_v4(scope)
+    if not expected:
+        raise NetnsError("Périmètre sans entrée IPv4 : rien n'est autorisé au niveau réseau.")
+    try:
+        installed = installed_networks(run)
+    except NetnsError as exc:
+        raise NetnsError(f"{exc} — {_UP_HINT}.") from exc
+    if installed != expected:
+        raise NetnsError(
+            f"Le périmètre réseau installé ({', '.join(map(str, installed)) or 'vide'}) ne "
+            f"correspond pas au périmètre actif ({', '.join(map(str, expected))}) — {_UP_HINT}.")
+
+
+def run_isolated(argv: list[str], timeout: int = 120) -> str:
+    """Exécute `argv` dans le namespace filtré, après vérification du périmètre.
+
+    La vérification est refaite à CHAQUE appel (pas de cache) : un scope.txt
+    modifié ou une table supprimée en cours de mission bloque dès la commande
+    suivante. Lève NetnsError ; n'exécute alors rien."""
+    scope = get_active_scope()
+    if scope is None:
+        raise NetnsError("Aucun périmètre actif : exécution refusée.")
+    verify(scope)
+    from tools.registry import _run  # lazy : évite un cycle d'import
+    return _run(wrap(argv), timeout)
+
+
 def main(argv: list[str] | None = None) -> int:
-    """CLI root : `python -m offense.netns {up,down} [--scope scope.txt] [--dns IP]`."""
+    """CLI : `python -m offense.netns {up,down,status} [--scope scope.txt] [--dns IP]`
+    (`up` et `down` en root)."""
     parser = argparse.ArgumentParser(
         prog="python -m offense.netns",
         description="Périmètre réseau du chemin offensif (namespace + nftables).")
-    parser.add_argument("action", choices=["up", "down"])
+    parser.add_argument("action", choices=["up", "down", "status"])
     parser.add_argument("--scope", default="scope.txt", help="fichier de périmètre (défaut : scope.txt)")
     parser.add_argument("--dns", default=None, help="résolveur IPv4 in-scope visible du namespace")
     args = parser.parse_args(argv)
@@ -245,7 +337,15 @@ def main(argv: list[str] | None = None) -> int:
     if sys.platform != "linux":
         print("offense.netns : Linux uniquement (network namespaces).", file=sys.stderr)
         return 2
-    if os.geteuid() != 0:
+    if args.action == "status":
+        try:
+            installed = installed_networks()
+        except NetnsError as exc:
+            print(f"[NETNS] absent — {exc}")
+            return 1
+        print(f"[NETNS] actif — sorties autorisées : {', '.join(map(str, installed)) or 'aucune'}")
+        return 0
+    if not _is_root():
         print("offense.netns : à lancer en root (sudo python -m offense.netns …).", file=sys.stderr)
         return 2
 
