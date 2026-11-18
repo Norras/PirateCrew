@@ -31,6 +31,31 @@ def test_report_finding_writes_credential():
     assert wm.evidence  # trace brute conservée
 
 
+def test_report_finding_audite_sans_le_secret(tmp_path, monkeypatch):
+    import tools.registry as reg
+    monkeypatch.setattr(reg, "AUDIT_LOG", str(tmp_path / "audit.log"))
+    wm = WorldModel(scope=Scope.from_lines(["10.10.10.0/24"]))
+    tool = make_report_finding_tool(wm)
+    tool.invoke({"kind": "credential", "host": "10.10.10.5", "service": "smb",
+                 "principal": "svc-x", "secret": "TopS3cret!", "cred_kind": "password"})
+    audit = (tmp_path / "audit.log").read_text(encoding="utf-8")
+    assert "FINDING" in audit                       # la trouvaille est tracée
+    assert "credential" in audit and "10.10.10.5" in audit and "svc-x" in audit
+    assert "TopS3cret!" not in audit                # le secret n'est JAMAIS journalisé
+
+
+def test_report_finding_loot_pas_dans_audit(tmp_path, monkeypatch):
+    import tools.registry as reg
+    monkeypatch.setattr(reg, "AUDIT_LOG", str(tmp_path / "audit.log"))
+    wm = WorldModel(scope=Scope.from_lines(["10.10.10.0/24"]))
+    tool = make_report_finding_tool(wm)
+    tool.invoke({"kind": "loot", "host": "10.10.10.5",
+                 "detail": "contenu sensible", "loot": "mot_de_passe=HUNTER2"})
+    audit = (tmp_path / "audit.log").read_text(encoding="utf-8")
+    assert "FINDING" in audit and "loot" in audit
+    assert "HUNTER2" not in audit and "sensible" not in audit  # ni loot ni detail brut
+
+
 def test_audit_event_escapes_newline(tmp_path, monkeypatch):
     import tools.registry as reg
     monkeypatch.setattr(reg, "AUDIT_LOG", str(tmp_path / "audit.log"))

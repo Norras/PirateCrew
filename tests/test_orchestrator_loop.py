@@ -135,6 +135,38 @@ def test_node_decide_passe_le_rag_a_l_auteur(monkeypatch, tmp_path):
     assert seen and seen[0][0] == "postgresql" and "NOTE-RAG-postgresql" in seen[0][1]
 
 
+def test_node_recon_audite_le_scan(monkeypatch):
+    # La recon est une action : elle doit laisser une ligne dans audit.log, même si
+    # ses sondes ne visent que des hôtes in-scope (pas de violation de périmètre).
+    import orchestrator as orch
+    import scope as scope_mod
+    from pathlib import Path
+    _patch_fake_agent(monkeypatch)
+    monkeypatch.setattr(orch, "_port_open", lambda h, p, timeout=1.0: False)
+    w = WorldModel(scope=Scope.from_lines(["127.0.0.1/32"]))
+    orch._MISSIONS["t_audit_recon"] = w
+    orch.node_recon({"target": "127.0.0.1", "cycle": 0, "question": "", "max_cycles": 6},
+                    {"configurable": {"thread_id": "t_audit_recon"}})
+    audit = Path(scope_mod.AUDIT_LOG).read_text(encoding="utf-8")
+    assert "RECON" in audit and "127.0.0.1" in audit
+
+
+def test_node_decide_audite_les_taches(monkeypatch):
+    # La décision de planification est une action : les techniques planifiées doivent
+    # apparaître dans audit.log.
+    import orchestrator as orch
+    import scope as scope_mod
+    from pathlib import Path
+    w = WorldModel(scope=Scope.from_lines(["127.0.0.1/32"]))
+    w.add_service("127.0.0.1", 445, name="smb")
+    orch._MISSIONS["t_audit_decide"] = w
+    orch.node_decide({"discovered_services": []},
+                     {"configurable": {"thread_id": "t_audit_decide"}})
+    audit = Path(scope_mod.AUDIT_LOG).read_text(encoding="utf-8")
+    assert "DECIDE" in audit
+    assert "smb.port_probe" in audit or "smb.enum_shares" in audit
+
+
 def test_integrate_captures_raw_evidence():
     wm = WorldModel(scope=Scope.from_lines(["10.10.10.0/24"]))
     n = reconcile_evidence(wm, "Found creds admin:Password1 on 10.10.10.5")
@@ -733,8 +765,12 @@ def test_node_integrate_clears_netns_missing_when_nothing_blocked(monkeypatch, t
     assert out["netns_missing"] is False
 
 
-def _smb_exhausted(thread_id):
+def _smb_exhausted(thread_id, monkeypatch):
     import orchestrator as orch
+    # Catalogue builtin SEUL : ces tests portent sur l'épuisement des techniques
+    # builtin du service, pas sur l'arsenal operator local (catalog/operator/*.yaml),
+    # qui rendrait le résultat dépendant de la machine.
+    monkeypatch.setattr(orch, "_CATALOG", load_catalog(operator_dir="catalog/__aucun__"))
     wm = WorldModel(scope=Scope.from_lines(["127.0.0.1/32"]))
     wm.add_service("127.0.0.1", 445, name="smb")
     for tid in ("smb.port_probe", "smb.enum_shares"):
@@ -748,7 +784,7 @@ def test_route_continue_pour_laisser_l_auteur_traiter_un_service_epuise(monkeypa
     # decide, où l'auteur LLM prend le relais — pas s'arrêter avant.
     import orchestrator as orch
     monkeypatch.setattr(orch, "technique_available", lambda t: True)
-    _smb_exhausted("t_route_dry")
+    _smb_exhausted("t_route_dry", monkeypatch)
     base = {"cycle": 1, "max_cycles": 6, "thread_id": "t_route_dry"}
     assert route_after_integrate(base) == "continue"
     # sans périmètre réseau, une technique LLM ne pourrait pas s'exécuter : fin
@@ -765,7 +801,7 @@ def test_auteur_une_seule_tentative_par_service(monkeypatch):
     calls = []
     monkeypatch.setattr(author, "author_technique",
                         lambda svc, ctx, invoke: calls.append(svc) or None)
-    _smb_exhausted("t_author_once")
+    _smb_exhausted("t_author_once", monkeypatch)
     cfg = {"configurable": {"thread_id": "t_author_once"}}
     orch.node_decide({"discovered_services": []}, cfg)
     orch.node_decide({"discovered_services": []}, cfg)

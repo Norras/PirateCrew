@@ -11,7 +11,7 @@ from langchain_anthropic import ChatAnthropic
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
 
-from scope import load_scope, set_active_scope, ScopeError
+from scope import load_scope, set_active_scope, ScopeError, _audit as _audit_event
 from state.world_model import WorldModel, Credential, Session, inputs_fingerprint
 from state import mission_io
 from catalog import load_catalog, techniques_for, technique_by_id
@@ -718,6 +718,8 @@ def node_recon(state: MissionState, config):
                          default_workers=workers)
     _found = [f"{s.host}:{s.port}/{s.name or '?'}" for h in world.in_scope_hosts() for s in h.services]
     _vprint(f"Services in-scope après découverte ({len(_found)}) : {_found or 'AUCUN'}")
+    _audit_event("RECON", f"{target} cycle {state.get('cycle', 0)}: {len(ports)} port(s) sondé(s), "
+                 f"{len(_found)} service(s) in-scope: " + (", ".join(_found) if _found else "aucun"))
     ctx = (f"OBJECTIF: reconnaître {target}. Pour CHAQUE service ouvert, appelle "
            f"report_finding(kind='service', host='{target}', service=<nom>, port=<port>).")
     agent = build_task_agent("network", world, ctx)
@@ -885,6 +887,7 @@ def node_decide(state: MissionState, config):
                 except Exception as exc:  # noqa: BLE001 - best-effort
                     _vprint(f"Persistance technique LLM échouée : {type(exc).__name__}")
                 world.add_evidence({"kind": "llm_technique", "service": svc, "id": tech.id})
+                _audit_event("AUTHORED", f"{svc}: {tech.id} (tool={tech.tool or '-'})")
                 authored = True
         if authored:
             tasks = plan_tasks(world, _effective_catalog(thread_id))
@@ -900,6 +903,9 @@ def node_decide(state: MissionState, config):
             rag = "\n\n---\n\n".join(d.page_content for d in docs)
         except Exception as exc:  # noqa: BLE001
             rag = f"(RAG indisponible : {type(exc).__name__})"
+    _audit_event("DECIDE", f"cycle {state.get('cycle', 0)}: {len(tasks)} tâche(s): "
+                 + (", ".join(f"{t['technique_id']}@{t['host']}:{t.get('port', 0)}" for t in tasks)
+                    if tasks else "aucune"))
     print(f"[MISSION] Décision : {len(tasks)} tâche(s) planifiée(s) pour ce cycle.")
     return {"planned": tasks, "rag_context": rag}
 

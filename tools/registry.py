@@ -320,6 +320,10 @@ def make_report_finding_tool(world: WorldModel):
             "kind": kind, "host": host, "service": service, "port": port,
             "principal": principal, "detail": detail,
         })
+        # Trace d'audit : champs STRUCTURELS uniquement. Jamais le secret, ni le
+        # contenu de loot, ni le detail brut (peuvent porter des données cible).
+        _audit("FINDING", f"{kind} host={host or '-'} port={port} service={service or '-'}"
+               + (f" principal={principal}" if principal else ""))
         if host:
             world.add_host(host)  # classe in_scope via le périmètre du modèle
         if kind == "service":
