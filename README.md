@@ -50,8 +50,11 @@ outils de leur domaine, plus les outils obligatoires (audit + vérification de p
   Aucun outil ne peut toucher une cible hors de la liste blanche.
 - On contacte l'**IP validée** par le périmètre, jamais un nom ré-résolu
   (protection contre le détournement DNS).
-- Chaque action est horodatée dans `audit.log` (sauts de ligne neutralisés pour
-  empêcher la forge de fausses lignes de log).
+- Chaque action est horodatée dans `audit.log` : périmètre, recon, décision de
+  planification, exécution de technique (`EXEC`) et trouvailles (`FINDING`). Les sauts
+  de ligne y sont neutralisés (anti-forge de fausses lignes). **`audit.log` ne contient
+  jamais de secret** : ni mot de passe, ni commande rendue, ni contenu de butin — seuls
+  des champs structurels (technique, hôte, port, service, principal, statut).
 
 ### Périmètre réseau (chemin offensif)
 
@@ -219,6 +222,15 @@ IP, jetons à forte entropie) n'est qu'un pré-tri : relisez avant de promouvoir
 
 Les résultats détaillés sont dans `missions/<id>/rapport.md` (rapport lisible) et
 `missions/<id>/world.json` (état complet, réécrit à chaque cycle).
+
+> ⚠️ **Secrets au repos.** PirateCrew récolte et réutilise des identifiants : par
+> conception, `rapport.md` et `world.json` contiennent les secrets trouvés **en clair**
+> (credentials, commandes rendues, sorties d'outils). C'est inhérent à un orchestrateur
+> de pentest, pas une fuite. Le dossier `missions/` est gitignoré (jamais versionné) ;
+> sur une machine partagée, restreignez-le (`chmod 700 missions/`). Si vous ne voulez
+> aucun secret au repos, n'exécutez pas de technique utilisant un credential, ou purgez
+> `missions/` après exploitation. `audit.log`, lui, n'en contient jamais (voir
+> [Sécurité](#sécurité-fail-closed)).
 
 ## Comment ça marche
 

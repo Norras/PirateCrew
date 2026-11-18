@@ -221,9 +221,21 @@ def http_get(url: str) -> str:
         conn.close()
     except Exception as exc:  # noqa: BLE001 - on rapporte toute erreur réseau proprement
         return f"Échec de la connexion à {url} ({type(exc).__name__}: {exc})"
-    text = (body.decode("utf-8", errors="replace")
-            if isinstance(body, (bytes, bytearray)) else str(body))
-    return f"{url} → HTTP {status} {reason}\n{text}"
+    return f"{url} → HTTP {status} {reason}\n{_decode_body(body)}"
+
+
+def _decode_body(body) -> str:
+    """Décode un corps HTTP en texte en respectant la nomenclature d'octets (BOM) :
+    UTF-16 LE/BE et UTF-8-BOM sont fréquents côté Windows (exports, PowerShell) et
+    ressortaient en charabia avec un décodage utf-8 forcé. Repli : utf-8. Jamais levant."""
+    if not isinstance(body, (bytes, bytearray)):
+        return str(body)
+    b = bytes(body)
+    if b[:2] in (b"\xff\xfe", b"\xfe\xff"):          # BOM UTF-16 : .decode l'absorbe et détecte l'ordre
+        return b.decode("utf-16", errors="replace")
+    if b[:3] == b"\xef\xbb\xbf":                      # BOM UTF-8
+        return b.decode("utf-8-sig", errors="replace")
+    return b.decode("utf-8", errors="replace")
 
 
 _HREF_RE = re.compile(r"""href\s*=\s*["']([^"']*)["']""", re.IGNORECASE)

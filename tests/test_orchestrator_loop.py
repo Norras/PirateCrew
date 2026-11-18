@@ -135,6 +135,51 @@ def test_node_decide_passe_le_rag_a_l_auteur(monkeypatch, tmp_path):
     assert seen and seen[0][0] == "postgresql" and "NOTE-RAG-postgresql" in seen[0][1]
 
 
+def test_node_execute_audite_chaque_technique(monkeypatch):
+    # Chaque technique qui passe par node_execute laisse une ligne EXEC (id, hôte,
+    # service, statut), SANS la commande rendue (qui porterait un credential).
+    import orchestrator as orch
+    import scope as scope_mod
+    from pathlib import Path
+    _patch_fake_agent(monkeypatch)
+    monkeypatch.setattr(orch, "_CATALOG", load_catalog(operator_dir="catalog/__aucun__"))
+    w = WorldModel(scope=Scope.from_lines(["127.0.0.1/32"]))
+    w.add_service("127.0.0.1", 445, name="smb")
+    orch._MISSIONS["t_exec_audit"] = w
+    cfg = {"configurable": {"thread_id": "t_exec_audit"}}
+    planned = plan_tasks(w, orch._CATALOG)
+    orch.node_execute({"planned": planned, "rag_context": ""}, cfg)
+    audit = Path(scope_mod.AUDIT_LOG).read_text(encoding="utf-8")
+    assert "EXEC" in audit
+    assert "smb.port_probe" in audit and "127.0.0.1:445" in audit
+
+
+def test_node_execute_audit_exec_sans_credential(monkeypatch):
+    # Chemin offensif operator : l'EXEC ne doit PAS contenir le mot de passe rendu.
+    import orchestrator as orch
+    import scope as scope_mod
+    from pathlib import Path
+    from catalog.loader import Technique
+    from state.world_model import Credential
+    tech = Technique(id="op.smb", name="x", domain="ad", service="smb", requires={"credential"},
+                     tool="smbclient", command_template="smbclient //{target}/s -U {user}%{password} -c ls",
+                     success_signal="ok", provided_by="operator")
+    monkeypatch.setattr(orch, "_CATALOG", [tech])
+    monkeypatch.setattr(orch, "technique_available", lambda t: True)
+    monkeypatch.setattr(orch.offense.executor, "execute_command",
+                        lambda rendered, timeout=120: ("done", "sortie"))
+    w = WorldModel(scope=Scope.from_lines(["127.0.0.1/32"]))
+    w.add_service("127.0.0.1", 445, name="smb")
+    w.add_credential(Credential(kind="password", principal="svc", secret="Zz-Secret-1!"))
+    orch._MISSIONS["t_exec_nocred"] = w
+    cfg = {"configurable": {"thread_id": "t_exec_nocred"}}
+    orch.node_execute({"planned": plan_tasks(w, orch._CATALOG), "rag_context": ""}, cfg)
+    audit = Path(scope_mod.AUDIT_LOG).read_text(encoding="utf-8")
+    exec_lines = [l for l in audit.splitlines() if "| EXEC |" in l]
+    assert exec_lines and any("op.smb" in l for l in exec_lines)
+    assert all("Zz-Secret-1!" not in l for l in exec_lines)  # jamais le secret
+
+
 def test_node_recon_audite_le_scan(monkeypatch):
     # La recon est une action : elle doit laisser une ligne dans audit.log, même si
     # ses sondes ne visent que des hôtes in-scope (pas de violation de périmètre).
