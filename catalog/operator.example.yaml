@@ -1,15 +1,15 @@
 # ============================================================================
-# GABARITS OPERATOR — exemple (NON chargé par le catalogue).
+# OPERATOR TEMPLATES — example (NOT loaded by the catalog).
 #
-# Copie ce fichier (ou des entrées) dans catalog/operator/<nom>.yaml puis
-# REMPLIS toi-même les `command_template` pour tes cibles AUTORISÉES.
-# Les `command_template` sont livrés VIDES : l'arsenal offensif précis
-# t'appartient. Les fichiers réels de catalog/operator/ ne sont pas versionnés
-# (voir .gitignore : catalog/operator/*.yaml).
+# Copy this file (or some of its entries) to catalog/operator/<name>.yaml, then
+# FILL IN the `command_template` values yourself for your AUTHORIZED targets.
+# The `command_template` values ship EMPTY: the specific offensive arsenal
+# belongs to you. The real files in catalog/operator/ are not versioned
+# (see .gitignore: catalog/operator/*.yaml).
 #
-# Format identique aux techniques builtin. `requires` liste les prérequis que
-# le modèle du terrain doit satisfaire pour que la technique soit proposée
-# (ex. [credential] = un credential applicable doit exister).
+# Same format as the builtin techniques. `requires` lists the prerequisites
+# the world model must satisfy for the technique to be offered
+# (e.g. [credential] = an applicable credential must exist).
 # ============================================================================
 
 - id: ad.kerberoasting
@@ -18,7 +18,7 @@
   service: kerberos
   requires: [credential]
   tool: ""
-  command_template: "<à fournir par l'opérateur>"
+  command_template: "<to be provided by the operator>"
   success_signal: ""
   provided_by: operator
 
@@ -28,7 +28,7 @@
   service: ldap
   requires: [credential]
   tool: ""
-  command_template: "<à fournir par l'opérateur>"
+  command_template: "<to be provided by the operator>"
   success_signal: ""
   provided_by: operator
 
@@ -38,16 +38,16 @@
   service: smb
   requires: [credential]
   tool: ""
-  command_template: "<à fournir par l'opérateur>"
+  command_template: "<to be provided by the operator>"
   success_signal: ""
   provided_by: operator
 
 - id: generic.brute_force
-  name: Brute-force d'authentification
+  name: Authentication brute-force
   domain: credentials
   service: "*"
   requires: []
   tool: ""
-  command_template: "<à fournir par l'opérateur>"
+  command_template: "<to be provided by the operator>"
   success_signal: ""
   provided_by: operator

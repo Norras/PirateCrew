@@ -1,14 +1,14 @@
-"""Modèle du terrain partagé d'une mission PirateCrew.
+"""Shared world model of a PirateCrew mission.
 
-Objet central d'une mission : ce qui est connu (hôtes, services), trouvé
-(credentials, butin, sessions, preuves) et tenté (ledger des techniques).
-L'orchestrateur le lit pour décider de l'action suivante ; les agents
-exécutants y écrivent leurs trouvailles de façon structurée.
+Central object of a mission: what is known (hosts, services), found
+(credentials, loot, sessions, evidence) and attempted (technique ledger).
+The orchestrator reads it to decide the next action; the executing agents
+write their findings into it in a structured way.
 
-Pur modèle de données + helpers : aucune action réseau, aucun payload. Le
-périmètre d'autorisation vit dans `scope` ; ce module ne fait que CLASSER les
-hôtes (in_scope / hors-liste) et n'importe jamais le paquet `tools`
-(`tools.registry` importe `state` en aval — l'inverse serait circulaire).
+Pure data model + helpers: no network action, no payload. The authorization
+scope lives in `scope`; this module only CLASSIFIES hosts (in_scope /
+off-list) and never imports the `tools` package (`tools.registry` imports
+`state` downstream — the reverse would be circular).
 """
 from __future__ import annotations
 
@@ -48,19 +48,19 @@ class Credential:
 @dataclass
 class Session:
     host: str
-    channel: str  # ex. evil-winrm, meterpreter, ssh
+    channel: str  # e.g. evil-winrm, meterpreter, ssh
     via_cred: str | None = None
     alive: bool = True
     handle: str = ""
-    authorized: bool = False  # session obtenue via une action explicitement autorisée
+    authorized: bool = False  # session obtained through an explicitly authorized action
 
 
 def inputs_fingerprint(inputs: dict) -> str:
-    """Empreinte stable des entrées réellement utilisées par une technique.
+    """Stable fingerprint of the inputs actually used by a technique.
 
-    '' quand il n'y a aucune entrée. Sert à CLÉFER le ledger : une même
-    technique relancée avec des entrées différentes (ex. un cred nouvellement
-    trouvé) lit comme « non tentée » et redevient donc exécutable.
+    '' when there are no inputs. Used to KEY the ledger: the same technique
+    re-run with different inputs (e.g. a newly found cred) reads as "not
+    tried" and therefore becomes executable again.
     """
     if not inputs:
         return ""
@@ -78,9 +78,9 @@ class WorldModel:
     technique_ledger: dict[tuple[str, str, str, str, int], str] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
-        """Instantané JSON-sérialisable du modèle (secrets en clair).
+        """JSON-serializable snapshot of the model (secrets in clear).
 
-        Le ledger, clé par tuple, devient une liste d'entrées nommées.
+        The ledger, keyed by tuple, becomes a list of named entries.
         """
         return {
             "hosts": {ip: asdict(h) for ip, h in self.hosts.items()},
@@ -96,14 +96,14 @@ class WorldModel:
         }
 
     # ------------------------------------------------------------------ #
-    # Hôtes / services
+    # Hosts / services
     # ------------------------------------------------------------------ #
     def add_host(self, ip: str, hostname: str | None = None) -> Host:
-        """Enregistre un hôte, classé via `scope.contains` (ne lève jamais).
+        """Register a host, classified via `scope.contains` (never raises).
 
-        Un hôte hors-périmètre est tout de même stocké avec `in_scope=False`
-        (le drapeau EST la trace) mais exclu de `in_scope_hosts()` : il ne
-        sera jamais tâché. Le refus est aussi tracé dans l'audit.
+        An out-of-scope host is still stored with `in_scope=False` (the flag
+        IS the trace) but excluded from `in_scope_hosts()`: it will never be
+        tasked. The refusal is also traced in the audit.
         """
         in_scope = self.scope.contains(ip)
         host = self.hosts.get(ip)
@@ -123,9 +123,9 @@ class WorldModel:
         h = self.hosts.get(host) or self.add_host(host)
         for existing in h.services:
             if existing.port == port and existing.proto == proto:
-                # Dédup par (port, proto), mais on enrichit un service d'abord vu
-                # anonymement : un name='' initial le rendrait invisible au
-                # planificateur (plan_tasks filtre sur svc.name) — perte silencieuse.
+                # Dedup by (port, proto), but enrich a service first seen
+                # anonymously: an initial name='' would make it invisible to the
+                # planner (plan_tasks filters on svc.name) — a silent loss.
                 if name and not existing.name:
                     existing.name = name
                 if version and not existing.version:
@@ -136,7 +136,7 @@ class WorldModel:
         return svc
 
     # ------------------------------------------------------------------ #
-    # Trouvailles
+    # Findings
     # ------------------------------------------------------------------ #
     def add_credential(self, cred: Credential) -> Credential:
         key = (cred.kind, cred.principal, cred.secret)
@@ -147,9 +147,8 @@ class WorldModel:
         return cred
 
     def add_session(self, sess: Session) -> Session:
-        """Ajoute une session, dédupliquée par (host, channel) : une session
-        existante est rafraîchie (alive/handle/via_cred) et conserve son
-        `authorized`."""
+        """Add a session, deduplicated by (host, channel): an existing session
+        is refreshed (alive/handle/via_cred) and keeps its `authorized`."""
         for s in self.sessions:
             if s.host == sess.host and s.channel == sess.channel:
                 s.alive = sess.alive
@@ -166,12 +165,12 @@ class WorldModel:
         self.evidence.append(item)
 
     def creds_applicable(self, service: str) -> list[Credential]:
-        """Credentials utilisables sur `service` : ceux sans cible connue
-        (`works_on` vide) ou explicitement marqués pour ce service."""
+        """Credentials usable on `service`: those with no known target
+        (empty `works_on`) or explicitly marked for this service."""
         return [c for c in self.credentials if not c.works_on or service in c.works_on]
 
     # ------------------------------------------------------------------ #
-    # Ledger des techniques tentées (clé par entrées, cf. inputs_fingerprint)
+    # Ledger of attempted techniques (keyed by inputs, see inputs_fingerprint)
     # ------------------------------------------------------------------ #
     def mark_technique(self, host: str, service: str, tech_id: str,
                        inputs_fp: str = "", status: str = "tried", port: int = 0) -> None:
@@ -182,21 +181,21 @@ class WorldModel:
         return (host, service, tech_id, inputs_fp, port) in self.technique_ledger
 
     # ------------------------------------------------------------------ #
-    # Vues
+    # Views
     # ------------------------------------------------------------------ #
     def in_scope_hosts(self) -> list[Host]:
         return [h for h in self.hosts.values() if h.in_scope]
 
     # ------------------------------------------------------------------ #
-    # Interne
+    # Internal
     # ------------------------------------------------------------------ #
     @staticmethod
     def _trace_out_of_scope(ip: str) -> None:
-        """Trace best-effort d'un hôte hors-périmètre dans l'audit partagé.
+        """Best-effort trace of an out-of-scope host in the shared audit log.
 
-        Écrit vers `scope.AUDIT_LOG` lu à l'appel (les tests le redirigent
-        vers un tmp), même format que les autres lignes d'audit. Ne lève
-        jamais : une trace ratée ne doit pas casser l'enregistrement.
+        Writes to `scope.AUDIT_LOG`, read at call time (tests redirect it to a
+        tmp file), same format as the other audit lines. Never raises: a
+        failed trace must not break the registration.
         """
         try:
             line = f"{datetime.now().isoformat(timespec='seconds')} | OUT_OF_SCOPE | {scope._audit_escape(ip)}\n"

@@ -1,7 +1,7 @@
-Bienvenue sur le partage public du Comptoir des Sept Mers (société fictive du lab).
+Welcome to the public share of the Seven Seas Trading Post (a fictional company of the lab).
 
-Dossiers :
-  Procedures/   procédures internes
-  Inventaire/   parc informatique
+Folders:
+  Procedures/   internal procedures
+  Inventaire/   IT assets
 
-Les exports comptables sont dans le partage « archives ».
+Accounting exports are in the "archives" share.

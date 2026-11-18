@@ -13,13 +13,13 @@ class AnalystAgentState(TypedDict):
 llm = ChatAnthropic(model="claude-sonnet-4-6")
 
 def node_analyze(state: AnalystAgentState):
-    print("[+] Exécution du sous-agent : Analyse de code / script...")
+    print("[+] Running sub-agent: code / script analysis...")
     question = state["question"]
 
-    prompt = f"""Tu es un analyste de code et de scripts offensifs expert au sein de PirateCrew.
-Analyse la demande, le code ou le script fourni par l'utilisateur. Explique son fonctionnement, ses mécanismes de contournement, ses risques de sécurité et, si nécessaire, les pistes de remédiation ou d'adaptation.
+    prompt = f"""You are an expert analyst of offensive code and scripts within PirateCrew.
+Analyze the request, code or script provided by the user. Explain how it works, its evasion mechanisms, its security risks and, where needed, remediation or adaptation options.
 
-=== DEMANDE / CODE À ANALYSER ===
+=== REQUEST / CODE TO ANALYZE ===
 {question}
 """
     reponse = llm.invoke(prompt)

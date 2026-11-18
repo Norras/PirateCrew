@@ -1,15 +1,15 @@
-"""Exécuteur offensif déterministe.
+"""Deterministic offensive executor.
 
-Exécute une commande rendue UNIQUEMENT après passage des garde-fous
-(`offense.guardrails`), en argv liste (`shell=False`). Ne lève jamais :
-renvoie toujours un couple `(statut, sortie)`.
+Runs a rendered command ONLY after it has passed the guardrails
+(`offense.guardrails`), as an argv list (`shell=False`). Never raises:
+always returns a `(status, output)` pair.
 """
 from offense import netns
 from offense.guardrails import GuardrailError, evaluate, tokenize_argv
 
 
 def _audit_block(tag: str, detail: str) -> None:
-    """Audit d'un blocage, au mieux (import paresseux, jamais bloquant)."""
+    """Audit a block, best effort (lazy import, never blocking)."""
     try:
         from tools.registry import _audit
         _audit("OFFENSE_BLOCKED", f"{tag}: {detail}")
@@ -18,25 +18,25 @@ def _audit_block(tag: str, detail: str) -> None:
 
 
 def execute_command(rendered: str, *, timeout: int = 120, runner=None) -> tuple[str, str]:
-    """Exécute `rendered` si les garde-fous passent. Ne lève jamais.
+    """Run `rendered` if the guardrails pass. Never raises.
 
-    Retourne `(statut, sortie)` avec statut dans {"done", "error",
+    Returns `(status, output)` with status in {"done", "error",
     "blocked_shell_meta", "blocked_destructive", "blocked_out_of_scope",
     "blocked_no_netns"}.
-    `runner(argv, timeout) -> str` est injectable. Par défaut la commande tourne
-    dans le namespace réseau filtré (`offense.netns.run_isolated`) : c'est le
-    noyau qui applique le périmètre, quelle que soit l'écriture de l'hôte. Si ce
-    namespace n'est pas en place ou ne correspond pas au périmètre actif, rien
-    n'est exécuté (`blocked_no_netns`) — il n'existe pas de repli sans namespace.
-    Un blocage court-circuite : le runner n'est jamais appelé.
+    `runner(argv, timeout) -> str` is injectable. By default the command runs
+    in the filtered network namespace (`offense.netns.run_isolated`): the
+    kernel enforces the perimeter, however the host is written. If that
+    namespace is not in place or does not match the active scope, nothing
+    is run (`blocked_no_netns`) — there is no fallback without a namespace.
+    A block short-circuits: the runner is never called.
     """
     if not (rendered or "").strip():
-        return ("error", "(aucune commande)")
+        return ("error", "(no command)")
 
     try:
         verdict = evaluate(rendered)
-    except Exception as e:  # défense en profondeur : ne jamais lever
-        return ("error", f"garde-fou: {type(e).__name__}")
+    except Exception as e:  # defense in depth: never raise
+        return ("error", f"guardrail: {type(e).__name__}")
     if verdict is not None:
         _audit_block(*verdict)
         return verdict
@@ -48,10 +48,10 @@ def execute_command(rendered: str, *, timeout: int = 120, runner=None) -> tuple[
 
     try:
         if runner is None:
-            runner = netns.run_isolated  # résolu à l'appel : frontière réseau par défaut
+            runner = netns.run_isolated  # resolved at call time: network boundary by default
         return ("done", runner(argv, timeout))
     except netns.NetnsError as e:
         _audit_block("blocked_no_netns", str(e))
         return ("blocked_no_netns", str(e))
-    except Exception as e:  # le mode « ne lève jamais » prime
-        return ("error", f"Échec d'exécution : {e}")
+    except Exception as e:  # the "never raises" contract takes precedence
+        return ("error", f"Execution failed: {e}")

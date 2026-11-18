@@ -1,4 +1,4 @@
-"""Fixtures pytest partagées (racine du projet)."""
+"""Shared pytest fixtures (project root)."""
 
 import pytest
 
@@ -10,23 +10,23 @@ from scope import Scope
 def pytest_configure(config):
     config.addinivalue_line(
         "markers",
-        "netns: test d'intégration du périmètre réseau (Linux + root + PIRATECREW_NETNS_IT=1)")
+        "netns: network perimeter integration test (Linux + root + PIRATECREW_NETNS_IT=1)")
 
 
 def _no_real_process(argv, **kwargs):
-    raise FileNotFoundError("processus réels désactivés dans les tests unitaires")
+    raise FileNotFoundError("real processes are disabled in unit tests")
 
 
 @pytest.fixture(autouse=True)
 def _isolate_scope_state(request, monkeypatch, tmp_path):
-    """Aucun périmètre actif ne fuit d'un test à l'autre (fail-closed par défaut).
+    """No active scope leaks from one test to the next (fail-closed by default).
 
-    Les refus journalisés pendant les tests vont dans un fichier temporaire,
-    pas dans le vrai audit.log de l'opérateur.
+    Refusals logged during tests go to a temporary file, not to the
+    operator's real audit.log.
 
-    Hors tests d'intégration (marqueur `netns`), le lanceur de processus du
-    périmètre réseau est neutralisé : la suite ne lance jamais sudo/ip/nft,
-    même sur une machine Linux où le namespace est en place.
+    Outside integration tests (`netns` marker), the network perimeter's
+    process launcher is neutralized: the suite never runs sudo/ip/nft,
+    even on a Linux machine where the namespace is in place.
     """
     if request.node.get_closest_marker("netns") is None:
         monkeypatch.setattr(netns, "_spawn", _no_real_process)

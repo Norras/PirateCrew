@@ -35,13 +35,13 @@ def test_ledger_keyed_by_inputs():
 
 
 def test_add_service_updates_name_when_first_seen_anonymously():
-    # Un port peut être remonté ouvert AVANT d'être identifié (name="") puis nommé.
+    # A port can be reported open BEFORE being identified (name=""), then named.
     wm = _wm()
-    wm.add_service("10.10.10.5", 445, name="")        # vu ouvert, pas encore identifié
-    svc = wm.add_service("10.10.10.5", 445, name="smb")  # identifié ensuite
-    assert svc.name == "smb"                           # le nom tardif n'est pas perdu
+    wm.add_service("10.10.10.5", 445, name="")        # seen open, not yet identified
+    svc = wm.add_service("10.10.10.5", 445, name="smb")  # identified afterwards
+    assert svc.name == "smb"                           # the late name is not lost
     host = wm.hosts["10.10.10.5"]
-    assert len([s for s in host.services if s.port == 445]) == 1  # toujours dédupliqué
+    assert len([s for s in host.services if s.port == 445]) == 1  # still deduplicated
     assert "smb" in {s.name for s in host.services if s.name}
 
 
@@ -54,20 +54,20 @@ def test_add_service_fills_version_on_existing():
 
 
 def test_out_of_scope_host_trace_escapes_newline():
-    # conftest redirige déjà scope.AUDIT_LOG vers un tmp isolé.
+    # conftest already redirects scope.AUDIT_LOG to an isolated tmp file.
     import scope as scope_mod
     from pathlib import Path
     wm = _wm()
-    wm.add_host("8.8.8.8\n2026-01-01T00:00:00 | RUN | nmap -A 10.0.0.1")  # hors-scope + newline
+    wm.add_host("8.8.8.8\n2026-01-01T00:00:00 | RUN | nmap -A 10.0.0.1")  # out of scope + newline
     audit = Path(scope_mod.AUDIT_LOG).read_text(encoding="utf-8")
-    assert audit.count("\n") == 1 and audit.endswith("\n")  # une seule ligne, pas deux
-    assert "\\n" in audit                                    # le saut de ligne est échappé
+    assert audit.count("\n") == 1 and audit.endswith("\n")  # a single line, not two
+    assert "\\n" in audit                                    # the line break is escaped
     assert "| OUT_OF_SCOPE |" in audit
 
 
 def test_ledger_distinguishes_port():
-    # Deux services de même nom sur des ports différents ne doivent pas se
-    # confondre dans le ledger : marquer l'un ne marque pas l'autre.
+    # Two services with the same name on different ports must not be
+    # conflated in the ledger: marking one does not mark the other.
     wm = _wm()
     wm.mark_technique("10.10.10.5", "http", "http.get", inputs_fp="", port=80)
     assert wm.is_tried("10.10.10.5", "http", "http.get", inputs_fp="", port=80) is True
@@ -85,12 +85,12 @@ def test_to_dict_is_json_serialisable_with_ledger_and_secrets():
     wm.add_session(Session(host="10.10.10.5", channel="evil-winrm"))
     wm.mark_technique("10.10.10.5", "smb", "smb.enum_shares", inputs_fp="", status="tried", port=445)
     d = wm.to_dict()
-    json.dumps(d)  # ne doit pas lever (clés tuple du ledger converties)
+    json.dumps(d)  # must not raise (the ledger's tuple keys are converted)
     assert d["technique_ledger"] == [
         {"host": "10.10.10.5", "service": "smb", "technique": "smb.enum_shares",
          "inputs_fp": "", "port": 445, "status": "tried"}
     ]
-    assert d["credentials"][0]["secret"] == "pw123"  # clair
+    assert d["credentials"][0]["secret"] == "pw123"  # in clear
     assert d["sessions"][0]["authorized"] is False
 
 
@@ -99,9 +99,9 @@ def test_add_session_dedups_by_host_channel_and_preserves_authorized():
     s1 = wm.add_session(Session(host="127.0.0.1", channel="evil-winrm", handle="h1"))
     s1.authorized = True
     s2 = wm.add_session(Session(host="127.0.0.1", channel="evil-winrm", handle="h2", alive=True))
-    assert len(wm.sessions) == 1          # pas de doublon
-    assert s2 is s1 and s1.handle == "h2" # rafraîchi
-    assert s1.authorized is True          # autorisation préservée au refresh
+    assert len(wm.sessions) == 1          # no duplicate
+    assert s2 is s1 and s1.handle == "h2" # refreshed
+    assert s1.authorized is True          # authorization preserved on refresh
 
 
 def test_add_session_distinct_channels_coexist():

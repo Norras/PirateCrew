@@ -1,14 +1,14 @@
-"""Preuve d'intégration du périmètre réseau — c'est le NOYAU qui est testé.
+"""Integration proof of the network scope — it is the KERNEL that is tested.
 
-Ces tests appellent `netns.run_isolated` directement, SANS passer par
-`offense.guardrails` : ils prouvent que la frontière tient même quand le
-contrôle texte laisse tout passer, et quelle que soit l'écriture de l'hôte.
+These tests call `netns.run_isolated` directly, WITHOUT going through
+`offense.guardrails`: they prove the boundary holds even when the text check
+lets everything through, and however the host is written.
 
-Banc d'essai : un second namespace (`pc-it-target`) joue la cible, avec une
-adresse dans le périmètre (198.51.100.10) et une hors périmètre (203.0.113.9),
-toutes deux servies par le même serveur HTTP. Rien ne sort de la machine.
+Test bench: a second namespace (`pc-it-target`) plays the target, with one
+in-scope address (198.51.100.10) and one out-of-scope address (203.0.113.9),
+both served by the same HTTP server. Nothing leaves the machine.
 
-Lancement (Linux, root) :
+Run (Linux, root):
     sudo PIRATECREW_NETNS_IT=1 venv/bin/pytest tests/test_netns_integration.py -v
 """
 import os
@@ -19,7 +19,7 @@ import time
 
 try:
     import pwd
-except ImportError:          # Windows : module absent, les tests y sont ignorés
+except ImportError:          # Windows: module absent, the tests are skipped there
     pwd = None
 
 import pytest
@@ -28,7 +28,7 @@ from offense import netns
 from scope import Scope, set_active_scope
 
 from netns_bench import CURL, IN_SCOPE, MARKER, MARKS, OUT_OF_SCOPE
-from netns_bench import _active_scope, bench  # noqa: F401 — fixtures du banc d'essai
+from netns_bench import _active_scope, bench  # noqa: F401 — test bench fixtures
 from netns_bench import sh as _sh
 
 pytestmark = MARKS
@@ -39,39 +39,40 @@ def test_in_scope_reachable():
 
 
 @pytest.mark.parametrize("url", [
-    "http://198.51.100.10.:8000/",     # point final
-    "http://3325256714:8000/",         # décimale
-    "http://0xc633640a:8000/",         # hexadécimale
-    "http:///198.51.100.10:8000/",     # confusion de slashs
+    "http://198.51.100.10.:8000/",     # trailing dot
+    "http://3325256714:8000/",         # decimal
+    "http://0xc633640a:8000/",         # hexadecimal
+    "http:///198.51.100.10:8000/",     # slash confusion
 ])
 def test_in_scope_reachable_whatever_the_notation(url):
-    # Témoin des notations : curl les accepte bien et se connecte. Le test
-    # symétrique ci-dessous n'est donc pas vert « parce que curl refuse l'URL ».
+    # Control for the notations: curl does accept them and connects. The
+    # symmetric test below is therefore not green "because curl rejects the URL".
     assert MARKER in netns.run_isolated([*CURL, url])
 
 
 @pytest.mark.parametrize("url", [
-    "http://203.0.113.9:8000/",        # pointée classique
-    "http://203.0.113.9.:8000/",       # point final
-    "http://3405803785:8000/",         # décimale
-    "http://0xcb007109:8000/",         # hexadécimale
-    "http:///203.0.113.9:8000/",       # confusion de slashs
+    "http://203.0.113.9:8000/",        # classic dotted
+    "http://203.0.113.9.:8000/",       # trailing dot
+    "http://3405803785:8000/",         # decimal
+    "http://0xcb007109:8000/",         # hexadecimal
+    "http:///203.0.113.9:8000/",       # slash confusion
 ])
 def test_out_of_scope_blocked_whatever_the_notation(url):
     assert MARKER not in netns.run_isolated([*CURL, url])
 
 
 @pytest.mark.parametrize("url", [
-    f"http://{netns.HOST_ADDR}:8001/",  # l'hôte, par le lien du namespace
-    "http://127.0.0.1:8001/",          # loopback : celui du namespace, vide
-    "http://198.51.100.1:8001/",       # une autre adresse de l'hôte
+    f"http://{netns.HOST_ADDR}:8001/",  # the host, via the namespace link
+    "http://127.0.0.1:8001/",          # loopback: the namespace's own, empty
+    "http://198.51.100.1:8001/",       # another host address
 ])
 def test_host_services_unreachable(url):
     assert MARKER not in netns.run_isolated([*CURL, url])
 
 
 def test_no_dns():
-    assert netns.run_isolated(["getent", "hosts", "example.com"]) == "(aucune sortie)"
+    # "(no output)" is the empty-output marker produced by tools.registry._run
+    assert netns.run_isolated(["getent", "hosts", "example.com"]) == "(no output)"
 
 
 def test_privileges_follow_the_caller():
@@ -90,9 +91,9 @@ def test_scope_drift_blocks():
 
 
 def test_widening_scope_opens_exactly_that_address(bench):
-    # Relancer `up` avec un périmètre élargi (namespace déjà en place) ouvre
-    # l'adresse ajoutée ; revenir au périmètre initial la referme. C'est donc
-    # bien le set — et lui seul — qui décide.
+    # Re-running `up` with a widened scope (namespace already in place) opens
+    # the added address; going back to the initial scope closes it again. So it is
+    # indeed the set — and only the set — that decides.
     wide = Scope.from_lines([f"{IN_SCOPE}/32", f"{OUT_OF_SCOPE}/32"])
     try:
         netns.up(wide)
@@ -106,8 +107,8 @@ def test_widening_scope_opens_exactly_that_address(bench):
 
 
 def test_timeout_is_enforced_inside_the_namespace():
-    # Le délai est appliqué après la descente de privilèges (`timeout`), pas
-    # seulement par subprocess côté appelant : la commande est réellement tuée.
+    # The deadline is applied after privileges are dropped (`timeout`), not
+    # only by subprocess on the caller's side: the command is really killed.
     start = time.monotonic()
     netns.run_isolated(["sleep", "300"], timeout=2)
     assert time.monotonic() - start < 12
@@ -116,8 +117,8 @@ def test_timeout_is_enforced_inside_the_namespace():
 
 @pytest.fixture
 def tool_dir():
-    # Répertoire d'outils « utilisateur » (type venv/bin, ~/.local/bin), lisible
-    # après la descente de privilèges.
+    # "User" tool directory (like venv/bin, ~/.local/bin), readable
+    # after privileges are dropped.
     path = tempfile.mkdtemp(prefix="pc-it-bin-", dir="/tmp")
     os.chmod(path, 0o755)
     tool = os.path.join(path, "pc-it-tool")
@@ -131,15 +132,15 @@ def tool_dir():
 
 
 def test_tool_on_callers_path_is_found(tool_dir, monkeypatch):
-    # Le script d'aide fixe son propre PATH ; celui de la mission est rendu à
-    # l'outil après la descente de privilèges.
+    # The helper script fixes its own PATH; the mission's PATH is handed back to
+    # the tool after privileges are dropped.
     monkeypatch.setenv("PATH", f"{tool_dir}:{os.environ['PATH']}")
     assert "TOOL_OK" in netns.run_isolated(["pc-it-tool"])
 
 
 def test_tool_on_callers_path_is_found_through_sudo(tool_dir, monkeypatch):
-    # Même chose en passant réellement par sudo (remise à zéro de l'environnement,
-    # secure_path). Lancé par root, sudo ne demande pas de mot de passe.
+    # Same thing going through sudo for real (environment reset,
+    # secure_path). Run by root, sudo does not ask for a password.
     monkeypatch.setattr(netns, "_is_root", lambda: False)
     monkeypatch.setenv("PATH", f"{tool_dir}:{os.environ['PATH']}")
     assert "TOOL_OK" in netns.run_isolated(["pc-it-tool"])
@@ -157,19 +158,19 @@ def test_identity_environment_follows_the_caller():
 _WIN_CMD = "/mnt/c/Windows/System32/cmd.exe"
 
 
-@pytest.mark.skipif(not os.path.exists(_WIN_CMD), reason="interop Windows : WSL uniquement")
+@pytest.mark.skipif(not os.path.exists(_WIN_CMD), reason="Windows interop: WSL only")
 def test_wsl_interop_is_closed_inside_the_namespace():
-    # Sous WSL2, un binaire Windows lancé depuis Linux s'exécute côté Windows,
-    # hors de tout namespace réseau : `curl.exe` sortirait sans passer par le
-    # filtre. L'interop doit donc être inopérante pour les commandes isolées.
+    # Under WSL2, a Windows binary launched from Linux runs on the Windows side,
+    # outside any network namespace: `curl.exe` would get out without going through the
+    # filter. Interop must therefore be inoperative for isolated commands.
     out = netns.run_isolated([_WIN_CMD, "/c", "echo", "INTEROP_OK"])
     assert "INTEROP_OK" not in out
 
 
 def test_down_cuts_a_running_command_and_up_works_again(bench):
-    # Une commande occupe encore le namespace : `ip netns del` ne le détruit pas.
-    # Le démontage doit quand même couper son lien (plus de transit possible une
-    # fois la table retirée), et un `up` suivant doit réussir.
+    # A command still occupies the namespace: `ip netns del` does not destroy it.
+    # The teardown must still cut its link (no more transit possible once the
+    # table is removed), and a following `up` must succeed.
     pinned = subprocess.Popen(["ip", "netns", "exec", netns.NS_NAME, "sleep", "60"])
     try:
         time.sleep(0.5)
@@ -184,8 +185,8 @@ def test_down_cuts_a_running_command_and_up_works_again(bench):
 
 
 def test_rules_flushed_blocks(bench):
-    # `nft flush table` garde le set (donc la vérification du set passerait) mais
-    # vide les chaînes : plus aucun filtre. Le script d'aide doit refuser.
+    # `nft flush table` keeps the set (so the set verification would pass) but
+    # empties the chains: no filter at all. The helper script must refuse.
     _sh("nft", "flush", "table", "inet", "piratecrew")
     try:
         with pytest.raises(netns.NetnsError):
@@ -195,19 +196,19 @@ def test_rules_flushed_blocks(bench):
 
 
 def test_namespace_removed_blocks(bench):
-    # Table présente mais namespace disparu : blocage explicite, pas une
-    # « sortie d'outil » qui marquerait la technique comme tentée.
+    # Table present but namespace gone: explicit block, not a
+    # "tool output" that would mark the technique as tried.
     _sh("ip", "netns", "del", netns.NS_NAME)
     try:
-        with pytest.raises(netns.NetnsError, match="namespace pc-offense absent"):
+        with pytest.raises(netns.NetnsError, match="namespace pc-offense missing"):
             netns.run_isolated([*CURL, f"http://{IN_SCOPE}:8000/"])
     finally:
         netns.up(bench)
 
 
-def test_table_removed_blocks():   # en dernier : détruit la table
+def test_table_removed_blocks():   # last: destroys the table
     _sh("nft", "delete", "table", "inet", "piratecrew")
     with pytest.raises(netns.NetnsError):
         netns.run_isolated([*CURL, f"http://{IN_SCOPE}:8000/"])
-    # Le script d'aide lui-même refuse d'entrer dans un namespace non filtré.
+    # The helper script itself refuses to enter an unfiltered namespace.
     assert _sh(netns.HELPER_PATH, "true", check=False).returncode == 97

@@ -11,7 +11,7 @@ DB_DIR = "./chroma_db"
 def charger_base_rag():
     embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-m3")
     if not os.path.exists(DB_DIR):
-        raise FileNotFoundError("La base ChromaDB n'existe pas. Lancez d'abord 'rag.py' !")
+        raise FileNotFoundError("The ChromaDB database does not exist. Run 'rag.py' first!")
     return Chroma(persist_directory=DB_DIR, embedding_function=embeddings)
 
 def interroger_agent_rag(question: str):
@@ -24,34 +24,34 @@ def interroger_agent_rag(question: str):
         model="claude-sonnet-4-6"
     )
 
-    prompt = f"""Tu es un assistant expert en cybersécurité et pentest.
-Utilise **exclusivement** la documentation fournie ci-dessous pour répondre à la question de l'utilisateur. 
-Si la réponse ne se trouve pas dans la documentation, indique-le clairement.
+    prompt = f"""You are an expert assistant in cybersecurity and pentesting.
+Use **only** the documentation provided below to answer the user's question.
+If the answer is not in the documentation, say so clearly.
 
-=== DOCUMENTATION SOURCE (RAG) ===
+=== SOURCE DOCUMENTATION (RAG) ===
 {contexte}
 
 === QUESTION ===
 {question}
 """
 
-    print("Envoi de la requête à Claude avec le contexte RAG...\n")
+    print("Sending the request to Claude with the RAG context...\n")
     reponse = llm.invoke(prompt)
-    
-    # Gestion sécurisée des métadonnées
+
+    # Safe handling of metadata
     meta = getattr(reponse, 'response_metadata', {}) or {}
     stop_reason = meta.get('stop_reason')
     
     if stop_reason == 'refusal' or not reponse.content:
-        print("[!] Alerte : Claude a bloqué la génération (filtrage de sécurité actif).")
-        return "Réponse bloquée par les filtres de sécurité du modèle."
+        print("[!] Warning: Claude blocked the generation (safety filtering active).")
+        return "Response blocked by the model's safety filters."
 
     return reponse.content
 
 if __name__ == "__main__":
-    ma_question = "Explique le fonctionnement du protocole DCSync dans l'Active Directory d'après les documents."
-    
+    ma_question = "Explain how the DCSync protocol works in Active Directory, based on the documents."
+
     resultat = interroger_agent_rag(ma_question)
-    
-    print("=== RÉPONSE DE CLAUDE ===")
+
+    print("=== CLAUDE'S RESPONSE ===")
     print(resultat)

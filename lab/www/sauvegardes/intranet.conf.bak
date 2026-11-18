@@ -1,6 +1,6 @@
-# Sauvegarde de configuration — DONNÉES FICTIVES DU LAB PIRATECREW
+# Configuration backup — FICTIONAL DATA FROM THE PIRATECREW LAB
 [site]
-nom = Comptoir des Sept Mers
+nom = Seven Seas Trading Post
 hote = 192.0.2.2
 
 [sauvegarde]

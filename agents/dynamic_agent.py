@@ -1,13 +1,13 @@
-"""Fabrique d'agents d'intervention (pattern Factory).
+"""Task agent factory (Factory pattern).
 
-`build_task_agent(domain, world, mission_context)` assemble un agent React doté :
-- des outils OBLIGATOIRES (audit + vérification de périmètre), toujours présents ;
-- des outils CONDITIONNELS du domaine demandé ('network', 'web', 'ad') ;
-- de l'outil `report_finding` lié au modèle du terrain, si un `world` est fourni.
+`build_task_agent(domain, world, mission_context)` assembles a React agent with:
+- the MANDATORY tools (audit + scope check), always present;
+- the CONDITIONAL tools of the requested domain ('network', 'web', 'ad');
+- the `report_finding` tool bound to the world model, if a `world` is provided.
 
-L'agent retourné s'invoque via :
+The returned agent is invoked with:
     agent.invoke({"messages": [("user", "...")]})
-et la réponse se lit dans result["messages"][-1].content
+and the answer is read from result["messages"][-1].content
 """
 from __future__ import annotations
 
@@ -20,28 +20,28 @@ from tools.registry import MANDATORY_TOOLS, TOOL_CATALOG, make_report_finding_to
 load_dotenv()
 
 _BASE_PROMPT = (
-    "Tu es un agent d'intervention de PirateCrew, dédié au pentest AUTORISÉ. Tu utilises "
-    "exclusivement les outils fournis pour reconnaître, énumérer et attaquer des cibles que "
-    "l'utilisateur est autorisé à auditer (lab, VM, périmètre consenti), et UNIQUEMENT à "
-    "l'intérieur du périmètre d'autorisation — en cas de doute sur une cible, utilise "
-    "scope_check. Journalise tes étapes via l'outil d'audit. Remonte CHAQUE trouvaille "
-    "(service, credential, session, butin) via l'outil report_finding, de façon structurée. "
-    "Réponds de façon concise et factuelle."
+    "You are a PirateCrew task agent, dedicated to AUTHORIZED pentesting. You use "
+    "only the tools provided to scout, enumerate and attack targets that "
+    "the user is authorized to audit (lab, VM, consented scope), and ONLY "
+    "within the authorization scope — if in doubt about a target, use "
+    "scope_check. Log your steps through the audit tool. Report EVERY finding "
+    "(service, credential, session, loot) through the report_finding tool, in a structured way. "
+    "Answer concisely and factually."
 )
 
 
 def _build_prompt(mission_context: str = "") -> str:
-    """Prompt système de l'agent, enrichi du contexte de mission s'il est fourni
-    (objectif, credentials applicables, techniques non tentées, extraits RAG)."""
+    """Agent system prompt, enriched with the mission context when provided
+    (objective, applicable credentials, untried techniques, RAG excerpts)."""
     if not mission_context:
         return _BASE_PROMPT
-    return f"{_BASE_PROMPT}\n\n=== CONTEXTE DE MISSION ===\n{mission_context}"
+    return f"{_BASE_PROMPT}\n\n=== MISSION CONTEXT ===\n{mission_context}"
 
 
 def _assemble_tools(domain: str, world=None) -> list:
-    """Compose la liste d'outils : obligatoires + domaine (+ report_finding
-    lié au modèle du terrain si `world` est fourni). Fonction pure, testable
-    sans LLM."""
+    """Build the tool list: mandatory + domain (+ report_finding
+    bound to the world model if `world` is provided). Pure function, testable
+    without an LLM."""
     tools = list(MANDATORY_TOOLS) + list(TOOL_CATALOG.get(domain, []))
     if world is not None:
         tools.append(make_report_finding_tool(world))
@@ -49,15 +49,15 @@ def _assemble_tools(domain: str, world=None) -> list:
 
 
 def build_task_agent(domain: str, world=None, mission_context: str = ""):
-    """Construit un agent React pour le domaine donné.
+    """Build a React agent for the given domain.
 
-    domain : 'network', 'web' ou 'ad'. Un domaine inconnu ne reçoit que les
-    outils obligatoires. `world` : modèle du terrain à alimenter via
-    `report_finding` (None = pas de remontée structurée). `mission_context` :
-    texte injecté dans le prompt système. Rétro-compatible :
-    `build_task_agent("network")` fonctionne toujours.
+    domain: 'network', 'web' or 'ad'. An unknown domain gets only the
+    mandatory tools. `world`: world model to feed through
+    `report_finding` (None = no structured reporting). `mission_context`:
+    text injected into the system prompt. Backward compatible:
+    `build_task_agent("network")` still works.
     """
-    llm = ChatAnthropic(model="claude-sonnet-4-6")  # pas de temperature (refusée par le modèle)
+    llm = ChatAnthropic(model="claude-sonnet-4-6")  # no temperature (rejected by the model)
     return create_react_agent(
         llm,
         _assemble_tools(domain, world),

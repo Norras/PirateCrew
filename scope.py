@@ -1,11 +1,11 @@
-"""Périmètre d'autorisation de PirateCrew (allowlist IP/CIDR, fail-closed).
+"""PirateCrew authorization scope (IP/CIDR allowlist, fail-closed).
 
-Toute cible réseau doit appartenir au périmètre actif avant qu'un outil ne la
-touche. Sans périmètre actif, tout est refusé : l'absence de périmètre est une
-erreur, jamais une permission implicite. Aucun flag de contournement.
+Every network target must belong to the active scope before a tool touches
+it. With no active scope, everything is refused: a missing scope is an
+error, never an implicit permission. No bypass flag.
 
-Les appelants doivent utiliser l'IP renvoyée par `assert_in_scope` (et non le
-nom d'hôte d'origine) : c'est cette adresse-là qui a été vérifiée.
+Callers must use the IP returned by `assert_in_scope` (not the original
+hostname): that is the address that was actually verified.
 """
 
 import ipaddress
@@ -19,25 +19,25 @@ AUDIT_LOG = os.path.join(PROJECT_ROOT, "audit.log")
 
 
 class ScopeError(Exception):
-    """Périmètre absent ou invalide, ou cible hors périmètre."""
+    """Scope missing or invalid, or target out of scope."""
 
 
 def _audit_escape(value: str) -> str:
-    """Neutralise les CR/LF d'un champ d'audit.
+    """Neutralize the CR/LF of an audit field.
 
-    Une ligne par événement : une valeur contrôlée par la cible (hôte, détail,
-    URL) ne doit pas pouvoir forger une fausse entrée en injectant un saut de
-    ligne. Point unique de neutralisation, partagé par scope._audit,
-    tools.registry._audit et state.world_model._trace_out_of_scope.
+    One line per event: a target-controlled value (host, detail, URL) must
+    not be able to forge a fake entry by injecting a line break. Single point
+    of neutralization, shared by scope._audit, tools.registry._audit and
+    state.world_model._trace_out_of_scope.
     """
     return str(value).replace("\r", "\\r").replace("\n", "\\n")
 
 
 def _audit(action: str, detail: str = "") -> None:
-    """Append horodaté dans audit.log. Jamais bloquant.
+    """Timestamped append to audit.log. Never blocking.
 
-    Helper local (même format que tools.registry._audit) : importer le paquet
-    `tools` ici créerait un import circulaire.
+    Local helper (same format as tools.registry._audit): importing the `tools`
+    package here would create a circular import.
     """
     line = f"{datetime.now().isoformat(timespec='seconds')} | {_audit_escape(action)} | {_audit_escape(detail)}\n"
     try:
@@ -47,41 +47,41 @@ def _audit(action: str, detail: str = "") -> None:
         pass
 
 
-# Résolution DNS bornée (anti-blocage) + cache par mission (latence + OPSEC).
-# Un nom d'hôte n'est résolu qu'une fois par mission ; set_active_scope vide le cache.
+# Bounded DNS resolution (anti-hang) + per-mission cache (latency + OPSEC).
+# A hostname is resolved only once per mission; set_active_scope clears the cache.
 _DNS_TIMEOUT: float = 3.0
 _RESOLVE_CACHE: dict = {}
 
 
 def _gethostbyname_bounded(name: str, timeout: float):
-    """socket.gethostbyname borné par un timeout (thread démon). None si le délai
-    est dépassé (fail-closed : résolveur lent/bloqué non attendu) ou en cas d'échec."""
+    """socket.gethostbyname bounded by a timeout (daemon thread). None if the timeout
+    is exceeded (fail-closed: a slow/blocked resolver is not waited for) or on failure."""
     box: dict = {}
 
     def _work():
         try:
             box["ip"] = socket.gethostbyname(name)
-        except Exception as exc:  # gaierror ⊂ OSError, etc. : capturé, jamais propagé
+        except Exception as exc:  # gaierror ⊂ OSError, etc.: caught, never propagated
             box["err"] = exc
 
     th = threading.Thread(target=_work, daemon=True)
     th.start()
     th.join(timeout)
     if th.is_alive():
-        return None  # on n'attend pas un résolveur bloqué (OPSEC + anti-blocage)
+        return None  # do not wait for a blocked resolver (OPSEC + anti-hang)
     return box.get("ip")
 
 
 def _resolve(target: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
-    """Adresse IP de la cible, ou None si elle n'est pas résoluble.
+    """IP address of the target, or None if it cannot be resolved.
 
-    Les IP littérales ne déclenchent aucun appel DNS. Les noms d'hôte sont
-    résolus via une résolution BORNÉE (timeout, fail-closed) et MISE EN CACHE
-    par mission (`_RESOLVE_CACHE`, vidé par `set_active_scope`)."""
+    Literal IPs trigger no DNS call. Hostnames are resolved through a BOUNDED
+    resolution (timeout, fail-closed) and CACHED per mission
+    (`_RESOLVE_CACHE`, cleared by `set_active_scope`)."""
     if not isinstance(target, str) or not target:
         return None
     try:
-        return ipaddress.ip_address(target)  # IP littérale : aucun appel DNS
+        return ipaddress.ip_address(target)  # literal IP: no DNS call
     except ValueError:
         pass
     if target in _RESOLVE_CACHE:
@@ -94,25 +94,25 @@ def _resolve(target: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | Non
         except ValueError:  # UnicodeError ⊂ ValueError
             resolved = None
     if resolved is not None:
-        # On ne met en cache QUE les succès : un échec transitoire (timeout borné,
-        # résolveur momentanément indisponible) ne doit pas empoisonner un hôte
-        # in-scope pour toute la mission. Un nom durablement non résoluble sera
-        # re-tenté (borné) à chaque appel — coût négligeable (littéraux rares).
+        # Cache ONLY successes: a transient failure (bounded timeout, resolver
+        # momentarily unavailable) must not poison an in-scope host for the
+        # whole mission. A durably unresolvable name is retried (bounded) on
+        # each call — negligible cost (literals are rare).
         _RESOLVE_CACHE[target] = resolved
     return resolved
 
 
 class Scope:
-    """Liste blanche de réseaux autorisés."""
+    """Allowlist of authorized networks."""
 
     def __init__(self, networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network]):
         self.networks = list(networks)
 
     def hosts(self, max_hosts: int = 256) -> list[str]:
-        """Énumère les adresses hôtes du périmètre (bornée à `max_hosts`).
+        """Enumerate the scope's host addresses (capped at `max_hosts`).
 
-        Un /32 donne son unique adresse ; sinon les adresses utilisables
-        (sans réseau/broadcast IPv4). Dédoublonné, ordre d'apparition conservé.
+        A /32 yields its single address; otherwise the usable addresses
+        (no IPv4 network/broadcast). Deduplicated, order of appearance preserved.
         """
         out: list[str] = []
         seen: set[str] = set()
@@ -129,13 +129,14 @@ class Scope:
 
     @classmethod
     def from_lines(cls, lines: list[str]) -> "Scope":
-        """Construit un périmètre : une entrée IP ou CIDR par ligne.
+        """Build a scope: one IP or CIDR entry per line.
 
-        Les lignes vides et les commentaires (`#`) sont ignorés. Une entrée
-        invalide lève ScopeError plutôt que d'être écartée en silence.
+        Blank lines and comments (`#`) are ignored. An invalid entry raises
+        ScopeError rather than being silently dropped.
 
-        Parsing strict : un CIDR avec des bits hôte (`10.10.10.5/24`) est
-        refusé au lieu d'être élargi au réseau entier à l'insu de l'opérateur.
+        Strict parsing: a CIDR with host bits (`10.10.10.5/24`) is rejected
+        instead of being widened to the whole network without the operator's
+        knowledge.
         """
         networks = []
         for number, line in enumerate(lines, start=1):
@@ -146,32 +147,32 @@ class Scope:
                 networks.append(ipaddress.ip_network(entry, strict=True))
             except ValueError as exc:
                 raise ScopeError(
-                    f"Entrée de périmètre invalide (ligne {number}) : {entry!r} ({exc})"
+                    f"Invalid scope entry (line {number}): {entry!r} ({exc})"
                 ) from exc
         return cls(networks)
 
     def contains(self, target: str) -> bool:
-        """True si la cible (IP ou nom d'hôte résolu) est dans le périmètre.
+        """True if the target (IP or resolved hostname) is within the scope.
 
-        Ne lève jamais : une cible non résoluble est simplement hors périmètre.
+        Never raises: an unresolvable target is simply out of scope.
         """
         ip = _resolve(target)
         return ip is not None and any(ip in network for network in self.networks)
 
 
 def load_scope(path: str = "scope.txt") -> Scope:
-    """Charge le périmètre depuis un fichier (une entrée IP/CIDR par ligne).
+    """Load the scope from a file (one IP/CIDR entry per line).
 
-    Lève ScopeError si le fichier est absent, illisible ou sans entrée valide.
+    Raises ScopeError if the file is missing, unreadable or has no valid entry.
     """
     try:
         with open(path, encoding="utf-8-sig") as fh:
             lines = fh.readlines()
     except (OSError, UnicodeError) as exc:
-        raise ScopeError(f"Fichier de périmètre illisible : {path!r} ({exc})") from exc
+        raise ScopeError(f"Scope file unreadable: {path!r} ({exc})") from exc
     scope = Scope.from_lines(lines)
     if not scope.networks:
-        raise ScopeError(f"Aucune entrée IP/CIDR dans le fichier de périmètre : {path!r}")
+        raise ScopeError(f"No IP/CIDR entry in the scope file: {path!r}")
     return scope
 
 
@@ -179,11 +180,10 @@ _ACTIVE_SCOPE: Scope | None = None
 
 
 def set_active_scope(scope: Scope | None) -> None:
-    """Définit le périmètre actif du processus (None = tout refuser).
+    """Set the process's active scope (None = refuse everything).
 
-    Vide aussi le cache de résolution : une nouvelle mission (nouveau périmètre)
-    repart sur des résolutions fraîches, jamais une adresse mise en cache sous un
-    périmètre révolu."""
+    Also clears the resolution cache: a new mission (new scope) starts with
+    fresh resolutions, never an address cached under a past scope."""
     global _ACTIVE_SCOPE
     _ACTIVE_SCOPE = scope
     _RESOLVE_CACHE.clear()
@@ -194,19 +194,19 @@ def get_active_scope() -> Scope | None:
 
 
 def assert_in_scope(target: str) -> str:
-    """Renvoie l'IP normalisée de la cible si elle est dans le périmètre actif.
+    """Return the target's normalized IP if it is within the active scope.
 
-    Lève ScopeError (et journalise OUT_OF_SCOPE) si aucun périmètre n'est actif,
-    si la cible n'est pas résoluble ou si elle est hors périmètre.
+    Raises ScopeError (and logs OUT_OF_SCOPE) if no scope is active, if the
+    target is unresolvable or if it is out of scope.
     """
     scope = get_active_scope()
     if scope is None:
-        reason = "aucun périmètre actif"
+        reason = "no active scope"
     else:
-        # Résolution unique : l'adresse vérifiée est exactement celle renvoyée.
+        # Single resolution: the verified address is exactly the one returned.
         ip = _resolve(target)
         if ip is not None and scope.contains(str(ip)):
             return str(ip)
-        reason = "hors périmètre ou non résoluble"
+        reason = "out of scope or unresolvable"
     _audit("OUT_OF_SCOPE", target)
-    raise ScopeError(f"Cible refusée ({reason}) : {target!r}")
+    raise ScopeError(f"Target refused ({reason}): {target!r}")

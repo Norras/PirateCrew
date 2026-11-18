@@ -1,5 +1,5 @@
-"""Intégration bout-en-bout (sans LLM) : découverte d'un service HTTP sur un port
-inhabituel puis récupération d'un credential dans un fichier listé."""
+"""End-to-end integration (no LLM): discovery of an HTTP service on an unusual
+port, then retrieval of a credential from a listed file."""
 import functools
 import threading
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -31,7 +31,7 @@ def http_server(tmp_path):
         set_active_scope(previous)
 
 
-def test_decouverte_puis_moisson_de_credential(http_server):
+def test_discovery_then_credential_harvest(http_server):
     port, scope = http_server
     world = WorldModel(scope=scope)
     n = discover_services(world, ["127.0.0.1"], [port], _port_open, _http_name)

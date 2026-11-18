@@ -4,10 +4,10 @@ from state.world_model import WorldModel, Session
 
 
 def test_mission_refuses_without_scope(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)  # pas de scope.txt ici
+    monkeypatch.chdir(tmp_path)  # no scope.txt here
     out = enter_autonomous_mission({"thread_id": "t1", "target": "10.10.10.5"},
                                    {"configurable": {"thread_id": "t1"}})
-    assert out.get("finished") is True and "périmètre" in out.get("final_response", "").lower()
+    assert out.get("finished") is True and "scope" in out.get("final_response", "").lower()
 
 
 def test_mission_starts_with_scope(tmp_path, monkeypatch):
@@ -19,33 +19,33 @@ def test_mission_starts_with_scope(tmp_path, monkeypatch):
 
 
 def test_mission_start_reports_network_perimeter_state(tmp_path, monkeypatch, capsys):
-    # La porte de mission dit d'emblée si le chemin offensif est utilisable ; un
-    # périmètre réseau absent ne refuse PAS la mission (la reconnaissance reste possible).
+    # The mission gate says upfront whether the offensive path is usable; a missing
+    # network perimeter does NOT refuse the mission (reconnaissance remains possible).
     import offense.netns as netns
     (tmp_path / "scope.txt").write_text("10.10.10.0/24\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
 
     def absent(scope, run=None):
-        raise netns.NetnsError("table absente")
+        raise netns.NetnsError("table missing")
     monkeypatch.setattr(netns, "verify", absent)
     out = enter_autonomous_mission({"thread_id": "t_n1"}, {"configurable": {"thread_id": "t_n1"}})
     assert out.get("finished") is not True
-    assert "[NETNS] Chemin offensif désactivé : table absente" in capsys.readouterr().out
+    assert "[NETNS] Offensive path disabled: table missing" in capsys.readouterr().out
 
     monkeypatch.setattr(netns, "verify", lambda scope, run=None: None)
     enter_autonomous_mission({"thread_id": "t_n2"}, {"configurable": {"thread_id": "t_n2"}})
-    assert "[NETNS] Périmètre réseau actif (pc-offense)." in capsys.readouterr().out
+    assert "[NETNS] Network perimeter active (pc-offense)." in capsys.readouterr().out
 
 
 def test_mission_refusal_clears_stale_active_scope(tmp_path, monkeypatch):
     import scope as scope_mod
-    # Un périmètre d'une mission précédente est encore actif dans le processus...
+    # A scope from a previous mission is still active in the process...
     scope_mod.set_active_scope(scope_mod.Scope.from_lines(["10.10.20.0/24"]))
-    monkeypatch.chdir(tmp_path)  # ...mais plus aucun scope.txt ici => refus
+    monkeypatch.chdir(tmp_path)  # ...but there is no scope.txt here anymore => refusal
     out = enter_autonomous_mission({"thread_id": "t3"},
                                    {"configurable": {"thread_id": "t3"}})
     assert out.get("finished") is True
-    assert scope_mod.get_active_scope() is None  # fail-closed : le périmètre périmé est effacé
+    assert scope_mod.get_active_scope() is None  # fail-closed: the stale scope is cleared
 
 
 def test_pending_sessions_lists_unauthorized_alive():
@@ -63,9 +63,9 @@ def test_resume_reuses_world_and_authorizes(monkeypatch):
     wm.add_session(Session(host="127.0.0.1", channel="evil-winrm", authorized=False))
     orch._MISSIONS["prev"] = wm
     new_id = orch.resume_with_authorization("prev", "127.0.0.1", "127.0.0.1")
-    assert new_id and orch._MISSIONS[new_id] is wm          # même objet monde
-    assert all(s.authorized for s in wm.sessions)           # session autorisée
-    assert orch.resume_with_authorization("prev", "10.0.0.9", "x") is None  # rien à autoriser
+    assert new_id and orch._MISSIONS[new_id] is wm          # same world object
+    assert all(s.authorized for s in wm.sessions)           # session authorized
+    assert orch.resume_with_authorization("prev", "10.0.0.9", "x") is None  # nothing to authorize
 
 
 def _llm_tech(**over):
@@ -76,9 +76,9 @@ def _llm_tech(**over):
 
 
 def test_resume_carries_the_llm_overlay(monkeypatch):
-    # La reprise change de thread_id : la surcouche de techniques LLM de la mission
-    # d'origine doit suivre, sinon la technique que l'opérateur vient d'autoriser
-    # n'est plus planifiable (et l'auteur ne la réécrit pas : déjà rédigée).
+    # The resume changes thread_id: the LLM technique overlay of the original
+    # mission must follow, otherwise the technique the operator just authorized
+    # is no longer plannable (and the author does not rewrite it: already written).
     import orchestrator as orch
     wm = WorldModel(scope=Scope.from_lines(["127.0.0.1/32"]))
     wm.add_session(Session(host="127.0.0.1", channel="ssh", authorized=False))
@@ -90,38 +90,38 @@ def test_resume_carries_the_llm_overlay(monkeypatch):
 
 
 def test_resume_skips_the_llm_router(monkeypatch):
-    # L'autorisation est consommée AVANT la reprise : celle-ci ne doit pas dépendre
-    # d'un classement LLM qui pourrait l'envoyer ailleurs qu'en mission.
+    # The authorization is consumed BEFORE the resume: the resume must not depend on
+    # an LLM classification that could send it somewhere other than a mission.
     import orchestrator as orch
 
     class Boom:
         def invoke(self, *_a, **_k):
-            raise AssertionError("le routeur LLM ne doit pas être consulté pour une reprise")
+            raise AssertionError("the LLM router must not be consulted for a resume")
     monkeypatch.setattr(orch, "llm", Boom())
-    assert orch.master_supervisor({"question": "peu importe", "resume": True}) == "autonomous_mission"
-    assert "resume" in orch.MissionState.__annotations__     # canal d'état déclaré
+    assert orch.master_supervisor({"question": "whatever", "resume": True}) == "autonomous_mission"
+    assert "resume" in orch.MissionState.__annotations__     # state channel declared
 
 
 def test_non_mission_turn_does_not_forget_the_last_mission(monkeypatch):
-    # « authorize » et « sessions » visent la dernière MISSION : une question posée
-    # entre-temps (tour sans monde de mission) ne doit pas la faire oublier.
+    # "authorize" and "sessions" target the last MISSION: a question asked in
+    # between (turn without a mission world) must not make it forgotten.
     import orchestrator as orch
     monkeypatch.setitem(orch._MISSIONS, "m_last", WorldModel(scope=Scope.from_lines(["127.0.0.1/32"])))
     last = ("m_last", "127.0.0.1")
-    assert orch._last_mission_after(last, "tour-de-discussion", "127.0.0.1") == last
+    assert orch._last_mission_after(last, "chat-turn", "127.0.0.1") == last
     assert orch._last_mission_after((None, None), "m_last", "127.0.0.1") == last
 
 
 def test_mission_start_warns_when_scope_is_loopback(tmp_path, monkeypatch, capsys):
-    # 127.0.0.1 dans le périmètre : depuis le namespace c'est SA boucle locale,
-    # vide. Le chemin offensif n'atteindra rien — on le dit au lieu d'échouer en silence.
+    # 127.0.0.1 in the scope: from inside the namespace it is ITS OWN loopback,
+    # empty. The offensive path will reach nothing — we say so instead of failing silently.
     import offense.netns as netns
     monkeypatch.setattr(netns, "verify", lambda scope, run=None: None)
     (tmp_path / "scope.txt").write_text("127.0.0.1\n10.10.10.0/24\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     enter_autonomous_mission({"thread_id": "t_lo1"}, {"configurable": {"thread_id": "t_lo1"}})
     out = capsys.readouterr().out
-    assert "[NETNS] Attention : 127.0.0.1/32" in out and "boucle locale" in out
+    assert "[NETNS] Warning: 127.0.0.1/32" in out and "loopback" in out
 
     (tmp_path / "scope.txt").write_text("10.10.10.0/24\n", encoding="utf-8")
     enter_autonomous_mission({"thread_id": "t_lo2"}, {"configurable": {"thread_id": "t_lo2"}})
@@ -137,8 +137,8 @@ class _Store:
 
 
 def test_end_of_mission_queues_rag_promotion_for_the_operator(monkeypatch):
-    # Rien n'entre dans le RAG partagé sans la commande « promote » : le filtre
-    # automatique n'est qu'un pré-tri, il ne sait pas reconnaître toute donnée de cible.
+    # Nothing enters the shared RAG without the "promote" command: the automatic
+    # filter is only a pre-screen, it cannot recognize every piece of target data.
     import orchestrator as orch
     wm = WorldModel(scope=Scope.from_lines(["127.0.0.1/32"]))
     wm.add_host("127.0.0.1", hostname="dc01.corp.local")
@@ -146,12 +146,12 @@ def test_end_of_mission_queues_rag_promotion_for_the_operator(monkeypatch):
                         command_template="nmap -sV -p 445 {target}")
     specific = _llm_tech(id="llm.s", service="smb", requires=set(), tool="nmap",
                          command_template="nmap -sC -p 445 {target}",
-                         success_signal="bannière de DC01 visible")
+                         success_signal="DC01 banner visible")
     monkeypatch.setitem(orch._MISSIONS, "m_rag", wm)
     monkeypatch.setitem(orch._MISSION_CATALOG, "m_rag", [generic, specific])
     store = _Store()
     texts = orch.queue_promotion("m_rag")
-    assert len(texts) == 1 and "nmap -sV -p 445 {target}" in texts[0]   # le nom de la cible écarte l'autre
-    assert store.calls == []                                           # rien d'écrit sans l'opérateur
+    assert len(texts) == 1 and "nmap -sV -p 445 {target}" in texts[0]   # the target name rules out the other
+    assert store.calls == []                                           # nothing written without the operator
     assert orch.promote_pending(store=store) == 1 and len(store.calls) == 1
-    assert orch.promote_pending(store=store) == 0 and len(store.calls) == 1   # file vidée
+    assert orch.promote_pending(store=store) == 0 and len(store.calls) == 1   # queue emptied

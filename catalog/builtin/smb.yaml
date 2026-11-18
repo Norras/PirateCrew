@@ -1,16 +1,16 @@
-# Techniques builtin — SMB (énumération autorisée, non sensible).
+# Builtin techniques — SMB (authorized, non-sensitive enumeration).
 - id: smb.port_probe
-  name: Sonde des ports SMB/NetBIOS
+  name: SMB/NetBIOS port probe
   domain: recon
   service: smb
   requires: []
   tool: smb_port_probe
   command_template: ""
-  success_signal: "445=OUVERT"
+  success_signal: "445=OPEN"
   provided_by: builtin
 
 - id: smb.enum_shares
-  name: Listing des partages SMB (session nulle)
+  name: SMB share listing (null session)
   domain: ad
   service: smb
   requires: []

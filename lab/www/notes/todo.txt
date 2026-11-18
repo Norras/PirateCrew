@@ -1,6 +1,6 @@
-Notes de service — Marc (données fictives du lab)
+Service notes - Marc (fictional lab data)
 
-- Migrer l'intranet vers le nouveau serveur avant la fin du mois.
-- Le partage \\192.0.2.2\archives contient encore les exports de la compta : à trier.
-- Le compte svc-sauvegarde sert à la sauvegarde nocturne, sa configuration est dans sauvegardes/.
-- Rappeler à Jean de ne plus déposer de mots de passe dans le partage public.
+- Migrate the intranet to the new server before the end of the month.
+- The share \192.0.2.2\archives still contains the accounting exports: to be sorted.
+- The svc-sauvegarde account is used for the nightly backup; its configuration is in sauvegardes/.
+- Remind Jean to stop leaving passwords in the public share.

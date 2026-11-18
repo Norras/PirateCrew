@@ -12,13 +12,13 @@ def test_plan_tasks_filters_by_requires_and_ledger():
     wm.add_service("10.10.10.5", 445, name="smb")
     cat = load_catalog()
     tasks = plan_tasks(wm, cat)
-    assert any(t["service"] == "smb" for t in tasks)          # technique sans requires proposée
-    # une technique exigeant un cred n'apparaît pas tant qu'aucun cred applicable
+    assert any(t["service"] == "smb" for t in tasks)          # technique with no requires is proposed
+    # a technique requiring a cred does not appear as long as no cred is applicable
     assert all("credential" not in technique_by_id(cat, t["technique_id"]).requires
                for t in tasks)
 
 
-def test_author_model_configurable_par_env(monkeypatch):
+def test_author_model_configurable_via_env(monkeypatch):
     import orchestrator as o
     monkeypatch.delenv("PIRATECREW_AUTHOR_MODEL", raising=False)
     assert o._author_model_name() == "claude-sonnet-4-6"
@@ -38,24 +38,24 @@ def test_author_context_rich():
     w.add_credential(Credential(kind="password", principal="CORP\\admin", secret="p@ss"))
     w.mark_technique("10.0.0.5", "smb", "smb-brute", status="tried", port=445)
     w.add_evidence({"phase": "execute", "technique": "smb-brute", "host": "10.0.0.5",
-                    "raw": "NT_STATUS_LOGON_FAILURE pour admin"})
+                    "raw": "NT_STATUS_LOGON_FAILURE for admin"})
     ctx = _author_context(w, "smb")
-    assert "445" in ctx and "Samba 4.15" in ctx          # version + port du service visé
-    assert "http" in ctx                                  # service voisin
-    assert "CORP\\admin" in ctx and "p@ss" not in ctx     # principal oui, secret non
-    assert "smb-brute" in ctx and "LOGON_FAILURE" in ctx  # échec tenté + extrait du résultat
+    assert "445" in ctx and "Samba 4.15" in ctx          # version + port of the targeted service
+    assert "http" in ctx                                  # neighboring service
+    assert "CORP\\admin" in ctx and "p@ss" not in ctx     # principal yes, secret no
+    assert "smb-brute" in ctx and "LOGON_FAILURE" in ctx  # failed attempt + result excerpt
 
 
-def test_author_context_tronque_les_sorties_longues():
+def test_author_context_truncates_long_outputs():
     from orchestrator import _author_context
     w = WorldModel(scope=Scope.from_lines(["10.0.0.0/24"]))
     w.add_service("10.0.0.5", 445, name="smb")
     w.mark_technique("10.0.0.5", "smb", "t", status="tried", port=445)
-    # long mais à basse entropie (espaces) pour tester la troncature, pas le masquage
-    w.add_evidence({"phase": "execute", "technique": "t", "host": "10.0.0.5", "raw": "echec " * 1000})
+    # long but low entropy (spaces) to test truncation, not masking
+    w.add_evidence({"phase": "execute", "technique": "t", "host": "10.0.0.5", "raw": "failed " * 1000})
     ctx = _author_context(w, "smb")
-    assert "echec echec" in ctx        # début de l'extrait présent
-    assert ctx.count("echec") < 60     # tronqué (pas les 1000 occurrences)
+    assert "failed failed" in ctx      # start of the excerpt is present
+    assert ctx.count("failed") < 60    # truncated (not all 1000 occurrences)
 
 
 def test_author_context_masks_high_entropy_unknown_hash():
@@ -63,10 +63,10 @@ def test_author_context_masks_high_entropy_unknown_hash():
     w = WorldModel(scope=Scope.from_lines(["10.0.0.0/24"]))
     w.add_service("10.0.0.5", 445, name="smb")
     w.mark_technique("10.0.0.5", "smb", "dump", status="tried", port=445)
-    # hash NT inconnu (jamais reconcilié en Credential) dans la sortie brute
+    # unknown NT hash (never reconciled into a Credential) in the raw output
     w.add_evidence({"phase": "execute", "technique": "dump", "host": "10.0.0.5",
                     "raw": "Administrator ::: 31d6cfe0d16ae931b73c59d7e0c089c0 :::"})
-    ctx = _author_context(w, "smb")   # aucun credential connu -> masquage par entropie
+    ctx = _author_context(w, "smb")   # no known credential -> entropy-based masking
     assert "31d6cfe0d16ae931b73c59d7e0c089c0" not in ctx
     assert "***" in ctx
 
@@ -80,17 +80,17 @@ def test_author_context_redacts_known_secret():
     w.add_evidence({"phase": "execute", "technique": "smb-brute", "host": "10.0.0.5",
                     "raw": "admin:Summer2024! (valid session)"})
     ctx = _author_context(w, "smb")
-    assert "Summer2024!" not in ctx   # secret connu expurgé de l'extrait envoyé au LLM
-    assert "***" in ctx               # marqueur de rédaction présent
+    assert "Summer2024!" not in ctx   # known secret redacted from the excerpt sent to the LLM
+    assert "***" in ctx               # redaction marker present
 
 
-def test_author_context_ajoute_les_connaissances_rag():
+def test_author_context_adds_rag_knowledge():
     from orchestrator import _author_context
     w = WorldModel(scope=Scope.from_lines(["10.0.0.0/24"]))
     w.add_service("10.0.0.5", 445, name="smb")
-    assert "Connaissances" not in _author_context(w, "smb")          # sans RAG : inchangé
-    ctx = _author_context(w, "smb", extra="Note : énumérer les partages en session nulle")
-    assert "Connaissances" in ctx and "session nulle" in ctx
+    assert "Knowledge" not in _author_context(w, "smb")          # without RAG: unchanged
+    ctx = _author_context(w, "smb", extra="Note: enumerate shares over a null session")
+    assert "Knowledge" in ctx and "null session" in ctx
 
 
 class _Doc:
@@ -99,33 +99,33 @@ class _Doc:
         self.metadata = {"source": source} if source else {}
 
 
-def test_rag_for_author_interroge_le_service_et_borne_les_extraits():
+def test_rag_for_author_queries_the_service_and_bounds_excerpts():
     import orchestrator as o
     queries = []
 
     def search(query, k):
         queries.append((query, k))
-        return [_Doc("A" * 5000), _Doc("gabarit smbclient", source="llm_authored")]
+        return [_Doc("A" * 5000), _Doc("smbclient template", source="llm_authored")]
     out = o._rag_for_author("smb", search=search)
     assert "smb" in queries[0][0]
-    assert "A" * 500 in out and "A" * 600 not in out                  # extrait borné
-    assert "gabarit smbclient" in out and "technique promue" in out   # source signalée
+    assert "A" * 500 in out and "A" * 600 not in out                  # bounded excerpt
+    assert "smbclient template" in out and "promoted technique" in out   # source flagged
 
 
-def test_rag_for_author_ne_leve_jamais():
+def test_rag_for_author_never_raises():
     import orchestrator as o
 
     def boom(query, k):
-        raise RuntimeError("chroma hors ligne")
+        raise RuntimeError("chroma offline")
     assert o._rag_for_author("smb", search=boom) == ""
     assert o._rag_for_author("smb", search=lambda q, k: []) == ""
 
 
-def test_node_decide_passe_le_rag_a_l_auteur(monkeypatch, tmp_path):
+def test_node_decide_passes_the_rag_to_the_author(monkeypatch, tmp_path):
     import orchestrator as o
     import offense.catalog_author as author
     w = WorldModel(scope=Scope.from_lines(["10.0.0.0/24"]))
-    w.add_service("10.0.0.5", 5432, name="postgresql")               # aucun builtin
+    w.add_service("10.0.0.5", 5432, name="postgresql")               # no builtin
     monkeypatch.setattr(o, "get_world", lambda tid: w)
     monkeypatch.setattr(o, "_rag_for_author", lambda svc, search=None: f"NOTE-RAG-{svc}")
     seen = []
@@ -135,14 +135,14 @@ def test_node_decide_passe_le_rag_a_l_auteur(monkeypatch, tmp_path):
     assert seen and seen[0][0] == "postgresql" and "NOTE-RAG-postgresql" in seen[0][1]
 
 
-def test_node_execute_audite_chaque_technique(monkeypatch):
-    # Chaque technique qui passe par node_execute laisse une ligne EXEC (id, hôte,
-    # service, statut), SANS la commande rendue (qui porterait un credential).
+def test_node_execute_audits_each_technique(monkeypatch):
+    # Every technique going through node_execute leaves an EXEC line (id, host,
+    # service, status), WITHOUT the rendered command (which would carry a credential).
     import orchestrator as orch
     import scope as scope_mod
     from pathlib import Path
     _patch_fake_agent(monkeypatch)
-    monkeypatch.setattr(orch, "_CATALOG", load_catalog(operator_dir="catalog/__aucun__"))
+    monkeypatch.setattr(orch, "_CATALOG", load_catalog(operator_dir="catalog/__none__"))
     w = WorldModel(scope=Scope.from_lines(["127.0.0.1/32"]))
     w.add_service("127.0.0.1", 445, name="smb")
     orch._MISSIONS["t_exec_audit"] = w
@@ -154,8 +154,8 @@ def test_node_execute_audite_chaque_technique(monkeypatch):
     assert "smb.port_probe" in audit and "127.0.0.1:445" in audit
 
 
-def test_node_execute_audit_exec_sans_credential(monkeypatch):
-    # Chemin offensif operator : l'EXEC ne doit PAS contenir le mot de passe rendu.
+def test_node_execute_audit_exec_without_credential(monkeypatch):
+    # Operator offensive path: the EXEC line must NOT contain the rendered password.
     import orchestrator as orch
     import scope as scope_mod
     from pathlib import Path
@@ -167,7 +167,7 @@ def test_node_execute_audit_exec_sans_credential(monkeypatch):
     monkeypatch.setattr(orch, "_CATALOG", [tech])
     monkeypatch.setattr(orch, "technique_available", lambda t: True)
     monkeypatch.setattr(orch.offense.executor, "execute_command",
-                        lambda rendered, timeout=120: ("done", "sortie"))
+                        lambda rendered, timeout=120: ("done", "output"))
     w = WorldModel(scope=Scope.from_lines(["127.0.0.1/32"]))
     w.add_service("127.0.0.1", 445, name="smb")
     w.add_credential(Credential(kind="password", principal="svc", secret="Zz-Secret-1!"))
@@ -177,12 +177,12 @@ def test_node_execute_audit_exec_sans_credential(monkeypatch):
     audit = Path(scope_mod.AUDIT_LOG).read_text(encoding="utf-8")
     exec_lines = [l for l in audit.splitlines() if "| EXEC |" in l]
     assert exec_lines and any("op.smb" in l for l in exec_lines)
-    assert all("Zz-Secret-1!" not in l for l in exec_lines)  # jamais le secret
+    assert all("Zz-Secret-1!" not in l for l in exec_lines)  # never the secret
 
 
-def test_node_recon_audite_le_scan(monkeypatch):
-    # La recon est une action : elle doit laisser une ligne dans audit.log, même si
-    # ses sondes ne visent que des hôtes in-scope (pas de violation de périmètre).
+def test_node_recon_audits_the_scan(monkeypatch):
+    # Recon is an action: it must leave a line in audit.log, even if
+    # its probes only target in-scope hosts (no scope violation).
     import orchestrator as orch
     import scope as scope_mod
     from pathlib import Path
@@ -196,9 +196,9 @@ def test_node_recon_audite_le_scan(monkeypatch):
     assert "RECON" in audit and "127.0.0.1" in audit
 
 
-def test_node_decide_audite_les_taches(monkeypatch):
-    # La décision de planification est une action : les techniques planifiées doivent
-    # apparaître dans audit.log.
+def test_node_decide_audits_the_tasks(monkeypatch):
+    # The planning decision is an action: the planned techniques must
+    # appear in audit.log.
     import orchestrator as orch
     import scope as scope_mod
     from pathlib import Path
@@ -220,13 +220,13 @@ def test_integrate_captures_raw_evidence():
 
 def test_out_of_scope_discovery_not_tasked():
     wm = WorldModel(scope=Scope.from_lines(["10.10.10.0/24"]))
-    wm.add_host("8.8.8.8")  # découverte hors périmètre
+    wm.add_host("8.8.8.8")  # out-of-scope discovery
     assert "8.8.8.8" not in [t["host"] for t in plan_tasks(wm, load_catalog())]
 
 
 def test_parse_services_ignores_substrings_and_closed_ports():
-    # Un numéro de version/netmask ne doit pas créer de service par sous-chaîne,
-    # et une énumération de ports fermés non plus.
+    # A version number/netmask must not create a service by substring match,
+    # nor must an enumeration of closed ports.
     assert _parse_services("Apache/2.2.15 built 2021") == []        # "2021" != port 21
     assert _parse_services("Netmask 255.255.255.0") == []
     assert _parse_services("Host down. Checked 21,22,80,445 - none open.") == []
@@ -239,14 +239,14 @@ def test_parse_services_detects_open_services():
 
 
 def test_reconcile_requires_credential_cue():
-    # Prose ordinaire 'mot:valeur' SANS indice de credential => aucun faux secret.
+    # Ordinary 'word:value' prose WITHOUT a credential cue => no false secret.
     wm = WorldModel(scope=Scope.from_lines(["10.10.10.0/24"]))
     reconcile_evidence(wm, "Server:nginx\nHost:10.10.10.9\nDomain:WORKGROUP")
     assert wm.credentials == []
 
 
 def test_task_inputs_fp_changes_when_new_cred_discovered():
-    # R2 : un nouveau credential applicable change l'empreinte => technique ré-ouverte.
+    # R2: a new applicable credential changes the fingerprint => technique re-opened.
     wm = WorldModel(scope=Scope.from_lines(["10.10.10.0/24"]))
     wm.add_credential(Credential(kind="password", principal="svcA", secret="a", source="t"))
     fp1 = _task_inputs_fp(wm, "smb", {"credential"})
@@ -260,7 +260,7 @@ def test_task_inputs_fp_empty_without_credential_requirement():
     assert _task_inputs_fp(wm, "smb", set()) == ""
 
 
-# --- Milestone 1 : propagation de port + escalade « outil manquant » (Option Y) --- #
+# --- Milestone 1: port propagation + "missing tool" escalation (Option Y) --- #
 def test_plan_task_carries_service_port():
     wm = WorldModel(scope=Scope.from_lines(["127.0.0.1/32"]))
     wm.add_service("127.0.0.1", 8080, name="http")
@@ -300,7 +300,7 @@ def test_render_template_domain_from_principal():
 
 def test_render_template_unknown_placeholder_returns_raw():
     import orchestrator as orch
-    # Pas de cred : {user} inconnu -> gabarit brut (contrat Projet 1 inchange).
+    # No cred: unknown {user} -> raw template (Project 1 contract unchanged).
     assert orch._render_template("x {user}", "127.0.0.1") == "x {user}"
 
 
@@ -331,7 +331,7 @@ def test_blocked_missing_tool_escalates_and_not_marked_tried(monkeypatch, tmp_pa
     assert any(r["status"] == "blocked_missing_tool" and r["tool"] == "smbclient" for r in reports)
     out = orch.node_integrate({"planned": planned, "execution_reports": reports, "cycle": 0}, cfg)
     assert "smbclient" in out["final_response"]
-    # bloquée => NON marquée (replanifiable après install) ; exécutée => marquée
+    # blocked => NOT marked (replannable after install); executed => marked
     assert wm.is_tried("127.0.0.1", "smb", "smb.enum_shares", inputs_fp="", port=445) is False
     assert wm.is_tried("127.0.0.1", "smb", "smb.port_probe", inputs_fp="", port=445) is True
 
@@ -366,17 +366,17 @@ def test_start_mission_reuses_worldmodel_on_same_thread():
 
 def test_requested_ports_host_port():
     from orchestrator import requested_ports
-    assert requested_ports("fais une analyse sur 127.0.0.1:8980") == [8980]
+    assert requested_ports("run an analysis on 127.0.0.1:8980") == [8980]
 
 
 def test_requested_ports_word_port():
     from orchestrator import requested_ports
-    assert requested_ports("vérifie le port 8980") == [8980]
+    assert requested_ports("check port 8980") == [8980]
 
 
 def test_requested_ports_none():
     from orchestrator import requested_ports
-    assert requested_ports("analyse tout le périmètre autorisé") == []
+    assert requested_ports("analyze the whole authorized scope") == []
 
 
 def test_requested_ports_out_of_range():
@@ -428,8 +428,8 @@ def test_reconcile_no_cue_word_adds_no_credential():
 
 
 def test_reconcile_ignores_header_like_value_near_cue():
-    # Un en-tête compact « Clé:valeur » dans la fenêtre d'un indice ne doit PAS
-    # devenir un faux credential (garde anti-fabrication, cf. « Server:nginx »).
+    # A compact "Key:value" header inside a cue's window must NOT
+    # become a false credential (anti-fabrication guard, see "Server:nginx").
     wm = WorldModel(scope=Scope.from_lines(["10.10.10.0/24"]))
     reconcile_evidence(wm, "Password policy:\nServer:nginx")
     assert len(wm.credentials) == 0
@@ -441,38 +441,38 @@ def _creds(text):
     return {(c.principal, c.secret) for c in wm.credentials}
 
 
-def test_reconcile_cle_valeur_francais():
-    # Fichier de configuration « clé = valeur » : identifiant + mot de passe voisins.
+def test_reconcile_key_value_french():
+    # "key = value" configuration file with French key names: neighboring identifier + password.
     assert _creds("[sauvegarde]\nutilisateur = svc-sauvegarde\nmot_de_passe = Lab-Fictif-2026!") \
         == {("svc-sauvegarde", "Lab-Fictif-2026!")}
 
 
-def test_reconcile_cle_valeur_env_yaml_json():
+def test_reconcile_key_value_env_yaml_json():
     assert _creds('DB_USER=app\nDB_PASSWORD="s3cret!"') == {("app", "s3cret!")}
     assert _creds("db:\n  username: alice\n  password: 'Wond3rland'") == {("alice", "Wond3rland")}
     assert _creds('{\n  "login": "bob",\n  "passwd": "B0bPass!",\n}') == {("bob", "B0bPass!")}
 
 
-def test_reconcile_cle_valeur_sans_identifiant_ou_valeur_factice():
-    assert _creds("password = hunter2") == set()                      # pas d'identifiant voisin
-    assert _creds("user = admin\npassword = ${DB_PASS}") == set()     # variable, pas un secret
-    assert _creds("user = admin\npassword = ********") == set()       # masqué
-    assert _creds("user = admin\npassword =") == set()                # vide
-    assert _creds("user = admin\n\n\n\n\npassword = hunter2") == set()  # trop éloignés
+def test_reconcile_key_value_without_identifier_or_dummy_value():
+    assert _creds("password = hunter2") == set()                      # no neighboring identifier
+    assert _creds("user = admin\npassword = ${DB_PASS}") == set()     # variable, not a secret
+    assert _creds("user = admin\npassword = ********") == set()       # masked
+    assert _creds("user = admin\npassword =") == set()                # empty
+    assert _creds("user = admin\n\n\n\n\npassword = hunter2") == set()  # too far apart
 
 
-def test_reconcile_nom_de_cle_jamais_pris_pour_un_identifiant():
-    # « password:hunter2 » sur une ligne à indice : le principal serait « password ».
+def test_reconcile_key_name_never_mistaken_for_an_identifier():
+    # "password:hunter2" on a cue line: the principal would be "password".
     assert _creds("password:hunter2") == set()
 
 
-def test_reconcile_indice_francais_pour_la_forme_identifiant_secret():
+def test_reconcile_french_cue_for_the_identifier_secret_form():
     assert _creds("Identifiants du serveur :\nbob:Sup3rSecret") == {("bob", "Sup3rSecret")}
 
 
-def test_node_integrate_lit_les_sorties_d_outils_pas_seulement_le_resume(monkeypatch, tmp_path):
-    # Chemin agent (builtin) : le résumé du LLM ne recopie pas le fichier lu, mais la
-    # sortie de l'outil le contient — le rattrapage doit la voir.
+def test_node_integrate_reads_tool_outputs_not_only_the_summary(monkeypatch, tmp_path):
+    # Agent path (builtin): the LLM summary does not copy the file read, but the
+    # tool output contains it — the back-stop must see it.
     import orchestrator as orch
     from state import mission_io
     monkeypatch.setattr(mission_io, "MISSIONS_ROOT", tmp_path)
@@ -483,7 +483,7 @@ def test_node_integrate_lit_les_sorties_d_outils_pas_seulement_le_resume(monkeyp
 
     class _Final:
         type = "ai"
-        content = "J'ai lu le fichier de sauvegarde."
+        content = "I read the backup file."
 
     class _Agent:
         def invoke(self, _):
@@ -501,8 +501,8 @@ def test_node_integrate_lit_les_sorties_d_outils_pas_seulement_le_resume(monkeyp
 
 
 def test_discover_services_logs_each_open_port():
-    # Mode verbose : un callback `log` reçoit une ligne par port ouvert (et aucune
-    # pour les ports fermés), avec l'hôte, le port et le service détecté.
+    # Verbose mode: a `log` callback receives one line per open port (and none
+    # for closed ports), with the host, the port and the detected service.
     from orchestrator import discover_services
     wm = WorldModel(scope=Scope.from_lines(["127.0.0.1/32"]))
     msgs = []
@@ -515,20 +515,21 @@ def test_discover_services_logs_each_open_port():
 
 
 def test_vprint_respects_verbose_flag(capsys):
-    # _vprint n'imprime que lorsque le mode verbose est actif ; set_verbose bascule.
+    # _vprint only prints when verbose mode is on; set_verbose toggles it.
     import orchestrator as orch
     orch.set_verbose(False)
-    orch._vprint("caché")
+    orch._vprint("hidden")
     assert capsys.readouterr().out == ""
     orch.set_verbose(True)
     orch._vprint("visible")
     assert "visible" in capsys.readouterr().out
-    orch.set_verbose(False)  # restaure l'état global
+    orch.set_verbose(False)  # restore the global state
 
 
 def test_wants_full_scan_detects_phrases():
-    # Reconnaît une intention de balayage COMPLET ; ignore un port explicite ou le
-    # simple mot « tout » (périmètre) sans « ports ».
+    # Recognizes an intent to sweep the FULL range; ignores an explicit port or the
+    # mere word "tout" (scope) without "ports". The French phrasings are intentional:
+    # the detection regex matches French requests.
     from orchestrator import wants_full_scan
     assert wants_full_scan("scanne tous les ports") is True
     assert wants_full_scan("fais un scan complet de 127.0.0.1") is True
@@ -537,8 +538,8 @@ def test_wants_full_scan_detects_phrases():
 
 
 def test_discover_services_parallel_finds_open_ports():
-    # Sondage parallèle (workers>1) : trouve les mêmes ports ouverts, résultat
-    # déterministe, enregistrement séquentiel dans le WorldModel.
+    # Parallel probing (workers>1): finds the same open ports, deterministic
+    # result, sequential registration in the WorldModel.
     from orchestrator import discover_services
     wm = WorldModel(scope=Scope.from_lines(["127.0.0.1/32"]))
     opened = {22, 8980}
@@ -553,7 +554,7 @@ def test_discover_services_parallel_finds_open_ports():
 def test_autonomous_discovery_escalates_on_empty_host():
     from orchestrator import autonomous_discovery
     wm = WorldModel(scope=Scope.from_lines(["127.0.0.1/32"]))
-    # rien sur les ports par défaut ; un service sur un port haut hors défaut
+    # nothing on the default ports; one service on a high non-default port
     probe = lambda h, p: p == 50000
     n = autonomous_discovery(wm, ["127.0.0.1"], [80, 443], probe=probe,
                              fingerprint=lambda h, p: "http")
@@ -565,10 +566,10 @@ def test_autonomous_discovery_escalates_on_empty_host():
 def test_autonomous_discovery_no_escalation_when_service_found():
     from orchestrator import autonomous_discovery
     wm = WorldModel(scope=Scope.from_lines(["127.0.0.1/32"]))
-    probe = lambda h, p: p in (80, 50000)   # 80 est dans les défauts
+    probe = lambda h, p: p in (80, 50000)   # 80 is in the defaults
     autonomous_discovery(wm, ["127.0.0.1"], [80], probe=probe)
     ports = sorted(s.port for h in wm.in_scope_hosts() for s in h.services)
-    assert ports == [80]  # pas d'escalade → 50000 jamais sondé/enregistré
+    assert ports == [80]  # no escalation → 50000 never probed/registered
 
 
 def test_node_integrate_persists_world_each_cycle(tmp_path, monkeypatch):
@@ -606,8 +607,8 @@ def test_node_execute_runs_offensive_technique_deterministically(monkeypatch, tm
     from state import mission_io
     from catalog.loader import Technique
     monkeypatch.setattr(mission_io, "MISSIONS_ROOT", tmp_path)
-    # agent = bombe : s'il est appelé sur une technique offensive, le test échoue
-    def _boom(*a, **k): raise AssertionError("agent ne doit pas exécuter une technique offensive")
+    # agent = tripwire: if it is called on an offensive technique, the test fails
+    def _boom(*a, **k): raise AssertionError("the agent must not execute an offensive technique")
     monkeypatch.setattr("agents.dynamic_agent.build_task_agent", _boom)
     tech = Technique(id="llm.win", name="n", domain="ad", service="smb", requires=set(),
                      tool="crackmapexec", command_template="crackmapexec smb {target} -u {user} -H {hash}",
@@ -633,7 +634,7 @@ def test_propose_only_skips_llm_execution(monkeypatch, tmp_path):
     from catalog.loader import Technique
     monkeypatch.setattr(mission_io, "MISSIONS_ROOT", tmp_path)
     monkeypatch.setattr("offense.executor.execute_command",
-                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("ne doit pas exécuter")))
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not execute")))
     tech = Technique(id="llm.x", name="n", domain="ad", service="smb", requires=set(),
                      tool="cme", command_template="cme smb {target}", success_signal="ok",
                      provided_by="llm")
@@ -653,22 +654,22 @@ def test_propose_only_skips_llm_execution(monkeypatch, tmp_path):
 def test_dry_services_detects_service_without_technique():
     import orchestrator as orch
     wm = WorldModel(scope=Scope.from_lines(["127.0.0.1/32"]))
-    wm.add_service("127.0.0.1", 9999, name="exotic")   # aucun builtin pour "exotic"
+    wm.add_service("127.0.0.1", 9999, name="exotic")   # no builtin for "exotic"
     assert "exotic" in orch._dry_services(wm, orch._CATALOG, planned=[])
-    wm.add_service("127.0.0.1", 445, name="smb")        # smb a des builtins
+    wm.add_service("127.0.0.1", 445, name="smb")        # smb has builtins
     assert "smb" not in orch._dry_services(wm, orch._CATALOG, planned=plan_tasks(wm, orch._CATALOG))
 
 
 def test_node_execute_skips_unfillable_placeholder_without_executing(monkeypatch, tmp_path):
-    # Un gabarit avec un placeholder non remplissable ({share} sans valeur) NE DOIT PAS
-    # s'exécuter en brut : on remonte blocked_missing_input, l'exécuteur n'est jamais appelé.
+    # A template with an unfillable placeholder ({share} with no value) MUST NOT
+    # run raw: we report blocked_missing_input, the executor is never called.
     import orchestrator as orch
     from state import mission_io
     from catalog.loader import Technique
     monkeypatch.setattr(mission_io, "MISSIONS_ROOT", tmp_path)
     monkeypatch.setattr("offense.executor.execute_command",
                         lambda *a, **k: (_ for _ in ()).throw(
-                            AssertionError("ne doit pas exécuter un gabarit non rendu")))
+                            AssertionError("must not execute an unrendered template")))
     tech = Technique(id="llm.share", name="n", domain="ad", service="smb", requires=set(),
                      tool="smbclient", command_template="smbclient //{target}/{share} -U {user}",
                      success_signal="ok", provided_by="llm")
@@ -686,15 +687,15 @@ def test_node_execute_skips_unfillable_placeholder_without_executing(monkeypatch
 
 
 def test_node_execute_blocks_out_of_scope_literal_ip(monkeypatch, tmp_path):
-    # Un hôte LITTÉRAL hors périmètre dans le gabarit (opérateur/LLM) est bloqué AVANT
-    # exécution (contrôle sur le gabarit), l'exécuteur n'est jamais appelé.
+    # A LITERAL out-of-scope host in the template (operator/LLM) is blocked BEFORE
+    # execution (check on the template), the executor is never called.
     import orchestrator as orch
     from state import mission_io
     from catalog.loader import Technique
     monkeypatch.setattr(mission_io, "MISSIONS_ROOT", tmp_path)
     monkeypatch.setattr("offense.executor.execute_command",
                         lambda *a, **k: (_ for _ in ()).throw(
-                            AssertionError("ne doit pas exécuter une technique hors périmètre")))
+                            AssertionError("must not execute an out-of-scope technique")))
     tech = Technique(id="op.x", name="n", domain="network", service="smb", requires=set(),
                      tool="nmap", command_template="nmap -sV {target} 10.0.0.9",
                      success_signal="open", provided_by="operator")
@@ -711,7 +712,7 @@ def test_node_execute_blocks_out_of_scope_literal_ip(monkeypatch, tmp_path):
 
 
 def test_node_execute_blocks_out_of_scope_hostname_resolving(monkeypatch, tmp_path):
-    # Un NOM D'HÔTE littéral est résolu puis contrôlé à l'exécution (modèle "résous + report").
+    # A literal HOST NAME is resolved then checked at execution time ("resolve + report" model).
     import orchestrator as orch
     import scope
     from state import mission_io
@@ -720,7 +721,7 @@ def test_node_execute_blocks_out_of_scope_hostname_resolving(monkeypatch, tmp_pa
     monkeypatch.setattr(scope.socket, "gethostbyname",
                         lambda n: "203.0.113.9" if n == "evil.example.com" else (_ for _ in ()).throw(OSError()))
     monkeypatch.setattr("offense.executor.execute_command",
-                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("ne doit pas exécuter")))
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not execute")))
     tech = Technique(id="op.h", name="n", domain="network", service="smb", requires=set(),
                      tool="nmap", command_template="nmap -sV {target} evil.example.com",
                      success_signal="open", provided_by="operator")
@@ -737,7 +738,7 @@ def test_node_execute_blocks_out_of_scope_hostname_resolving(monkeypatch, tmp_pa
 
 
 def test_node_integrate_marks_missing_input_tried(monkeypatch, tmp_path):
-    # blocked_missing_input est marqué 'tried' (boucle-sûr : pas de replanification infinie).
+    # blocked_missing_input is marked 'tried' (loop-safe: no infinite replanning).
     import orchestrator as orch
     from state import mission_io
     monkeypatch.setattr(mission_io, "MISSIONS_ROOT", tmp_path)
@@ -746,15 +747,15 @@ def test_node_integrate_marks_missing_input_tried(monkeypatch, tmp_path):
     orch._MISSIONS["t_mi"] = wm
     cfg = {"configurable": {"thread_id": "t_mi"}}
     reports = [{"technique": "llm.share", "host": "127.0.0.1", "service": "smb", "port": 445,
-                "inputs_fp": "", "status": "blocked_missing_input", "detail": "manque {share}"}]
+                "inputs_fp": "", "status": "blocked_missing_input", "detail": "missing {share}"}]
     orch.node_integrate({"planned": [], "execution_reports": reports, "cycle": 0}, cfg)
     assert wm.is_tried("127.0.0.1", "smb", "llm.share", inputs_fp="", port=445) is True
 
 
 def test_blocked_no_netns_escalates_and_is_not_marked_tried(monkeypatch, tmp_path):
-    # Périmètre réseau absent : la technique n'est PAS grillée (replanifiable après
-    # `offense.netns up`), l'opérateur est prévenu, et le message d'erreur — qui cite
-    # des adresses — n'alimente pas le modèle du monde.
+    # Network perimeter absent: the technique is NOT burned (replannable after
+    # `offense.netns up`), the operator is warned, and the error message — which cites
+    # addresses — does not feed the world model.
     import orchestrator as orch
     from state import mission_io
     monkeypatch.setattr(mission_io, "MISSIONS_ROOT", tmp_path)
@@ -764,7 +765,7 @@ def test_blocked_no_netns_escalates_and_is_not_marked_tried(monkeypatch, tmp_pat
     cfg = {"configurable": {"thread_id": "t_nn"}}
     reports = [{"technique": "op.n", "host": "10.0.0.5", "service": "smb", "port": 445,
                 "inputs_fp": "", "status": "blocked_no_netns",
-                "detail": "Le périmètre réseau installé (10.0.0.77) ne correspond pas"}]
+                "detail": "The installed network perimeter (10.0.0.77) does not match"}]
     out = orch.node_integrate({"planned": [], "execution_reports": reports, "cycle": 0}, cfg)
     assert wm.is_tried("10.0.0.5", "smb", "op.n", inputs_fp="", port=445) is False
     assert out["netns_missing"] is True
@@ -773,14 +774,14 @@ def test_blocked_no_netns_escalates_and_is_not_marked_tried(monkeypatch, tmp_pat
 
 
 def test_no_netns_through_node_execute_then_integrate(monkeypatch, tmp_path):
-    # Même contrat, de bout en bout : le statut de l'exécuteur traverse node_execute
-    # tel quel, et node_integrate ne grille pas la technique.
+    # Same contract, end to end: the executor's status goes through node_execute
+    # as is, and node_integrate does not burn the technique.
     import orchestrator as orch
     from state import mission_io
     from catalog.loader import Technique
     monkeypatch.setattr(mission_io, "MISSIONS_ROOT", tmp_path)
     monkeypatch.setattr("offense.executor.execute_command",
-                        lambda rendered, **kw: ("blocked_no_netns", "namespace absent"))
+                        lambda rendered, **kw: ("blocked_no_netns", "namespace missing"))
     tech = Technique(id="op.n", name="n", domain="network", service="smb", requires=set(),
                      tool="nmap", command_template="nmap -sV {target}",
                      success_signal="open", provided_by="operator")
@@ -796,7 +797,7 @@ def test_no_netns_through_node_execute_then_integrate(monkeypatch, tmp_path):
     out = orch.node_integrate({"planned": planned, "execution_reports": reports, "cycle": 0}, cfg)
     assert out["netns_missing"] is True
     assert wm.is_tried("127.0.0.1", "smb", "op.n", inputs_fp="", port=445) is False
-    assert plan_tasks(wm, orch._CATALOG)          # toujours replanifiable après `up`
+    assert plan_tasks(wm, orch._CATALOG)          # still replannable after `up`
 
 
 def test_node_integrate_clears_netns_missing_when_nothing_blocked(monkeypatch, tmp_path):
@@ -812,10 +813,10 @@ def test_node_integrate_clears_netns_missing_when_nothing_blocked(monkeypatch, t
 
 def _smb_exhausted(thread_id, monkeypatch):
     import orchestrator as orch
-    # Catalogue builtin SEUL : ces tests portent sur l'épuisement des techniques
-    # builtin du service, pas sur l'arsenal operator local (catalog/operator/*.yaml),
-    # qui rendrait le résultat dépendant de la machine.
-    monkeypatch.setattr(orch, "_CATALOG", load_catalog(operator_dir="catalog/__aucun__"))
+    # Builtin catalog ONLY: these tests are about exhausting the service's builtin
+    # techniques, not the local operator arsenal (catalog/operator/*.yaml),
+    # which would make the result machine-dependent.
+    monkeypatch.setattr(orch, "_CATALOG", load_catalog(operator_dir="catalog/__none__"))
     wm = WorldModel(scope=Scope.from_lines(["127.0.0.1/32"]))
     wm.add_service("127.0.0.1", 445, name="smb")
     for tid in ("smb.port_probe", "smb.enum_shares"):
@@ -824,21 +825,21 @@ def _smb_exhausted(thread_id, monkeypatch):
     return wm
 
 
-def test_route_continue_pour_laisser_l_auteur_traiter_un_service_epuise(monkeypatch):
-    # Toutes les techniques builtin du service tentées : la mission doit repasser par
-    # decide, où l'auteur LLM prend le relais — pas s'arrêter avant.
+def test_route_continues_to_let_the_author_handle_an_exhausted_service(monkeypatch):
+    # All the service's builtin techniques tried: the mission must go back through
+    # decide, where the LLM author takes over — not stop before.
     import orchestrator as orch
     monkeypatch.setattr(orch, "technique_available", lambda t: True)
     _smb_exhausted("t_route_dry", monkeypatch)
     base = {"cycle": 1, "max_cycles": 6, "thread_id": "t_route_dry"}
     assert route_after_integrate(base) == "continue"
-    # sans périmètre réseau, une technique LLM ne pourrait pas s'exécuter : fin
+    # without a network perimeter, an LLM technique could not run: finish
     assert route_after_integrate({**base, "netns_missing": True}) == "finish"
 
 
-def test_auteur_une_seule_tentative_par_service(monkeypatch):
-    # L'auteur ne propose rien d'utilisable : la tentative compte quand même, sinon la
-    # boucle le rappellerait à chaque cycle jusqu'au cap.
+def test_author_one_attempt_per_service(monkeypatch):
+    # The author proposes nothing usable: the attempt counts anyway, otherwise the
+    # loop would call it again every cycle up to the cap.
     import orchestrator as orch
     import offense.catalog_author as author
     monkeypatch.setattr(orch, "technique_available", lambda t: True)
@@ -855,7 +856,7 @@ def test_auteur_une_seule_tentative_par_service(monkeypatch):
                                   "thread_id": "t_author_once"}) == "finish"
 
 
-def test_route_ne_boucle_pas_sur_une_technique_llm_en_propose_only(monkeypatch):
+def test_route_does_not_loop_on_an_llm_technique_in_propose_only(monkeypatch):
     import orchestrator as orch
     from catalog.loader import Technique
     tech = Technique(id="llm.x", name="x", domain="ad", service="smb", requires=set(),
@@ -870,12 +871,12 @@ def test_route_ne_boucle_pas_sur_une_technique_llm_en_propose_only(monkeypatch):
     base = {"cycle": 1, "max_cycles": 6, "thread_id": "t_route_po"}
     assert route_after_integrate(base) == "continue"
     monkeypatch.setattr(orch, "_PROPOSE_ONLY", True)
-    assert route_after_integrate(base) == "finish"      # proposée, jamais exécutée : pas de boucle
+    assert route_after_integrate(base) == "finish"      # proposed, never executed: no loop
 
 
 def test_route_finishes_when_only_netns_blocked_tasks_remain(monkeypatch):
-    # Sans périmètre réseau, les techniques operator/llm ne sont pas exécutables :
-    # la boucle ne tourne pas à vide jusqu'au cap de cycles.
+    # Without the network perimeter, operator/llm techniques are not runnable:
+    # the loop does not spin idle up to the cycle cap.
     import orchestrator as orch
     from catalog.loader import Technique
     tech = Technique(id="op.n", name="n", domain="network", service="smb", requires=set(),
@@ -892,6 +893,6 @@ def test_route_finishes_when_only_netns_blocked_tasks_remain(monkeypatch):
 
 
 def test_netns_missing_is_a_declared_state_channel():
-    # LangGraph n'accepte en sortie de nœud que les clés déclarées dans l'état.
+    # LangGraph only accepts, as node output, keys declared in the state.
     import orchestrator as orch
     assert "netns_missing" in orch.MissionState.__annotations__

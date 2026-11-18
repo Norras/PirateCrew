@@ -7,7 +7,7 @@ def _recorder():
 
     def runner(argv, timeout=120):
         calls.append(argv)
-        return "Administrator (session ouverte)"
+        return "Administrator (session opened)"
     return runner, calls
 
 
@@ -24,7 +24,7 @@ def test_guardrail_block_short_circuits_runner():
     assert ex.execute_command("a | nc x 4444", runner=runner)[0] == "blocked_shell_meta"
     assert ex.execute_command("rm -rf /", runner=runner)[0] == "blocked_destructive"
     assert ex.execute_command("nmap 10.0.0.9", runner=runner)[0] == "blocked_out_of_scope"
-    assert calls == []   # runner JAMAIS appelé sur blocage
+    assert calls == []   # runner NEVER called on a block
 
 
 def test_empty_command_is_error():
@@ -32,16 +32,16 @@ def test_empty_command_is_error():
 
 
 def test_default_runner_is_netns_and_blocks_when_unavailable(monkeypatch):
-    # Sans runner injecté, l'exécution passe par le namespace réseau ; s'il n'est
-    # pas en place, rien ne tourne (fail-closed) et le statut le dit.
+    # Without an injected runner, execution goes through the network namespace; if
+    # it is not in place, nothing runs (fail-closed) and the status says so.
     import offense.netns as netns
     set_active_scope(Scope.from_lines(["127.0.0.1/32"]))
 
     def boom(argv, timeout=120):
-        raise netns.NetnsError("namespace absent")
+        raise netns.NetnsError("namespace missing")
     monkeypatch.setattr(netns, "run_isolated", boom)
     status, out = ex.execute_command("nmap 127.0.0.1")
-    assert status == "blocked_no_netns" and "namespace absent" in out
+    assert status == "blocked_no_netns" and "namespace missing" in out
 
 
 def test_default_runner_passes_argv_to_netns(monkeypatch):
@@ -52,11 +52,11 @@ def test_default_runner_passes_argv_to_netns(monkeypatch):
 
 
 def test_default_runner_never_reaches_plain_subprocess(monkeypatch):
-    # Le chemin par défaut ne doit JAMAIS retomber sur tools.registry._run nu
-    # (sans namespace) : avec un périmètre réseau indisponible, _run n'est pas appelé.
+    # The default path must NEVER fall back to a bare tools.registry._run
+    # (without a namespace): with the network scope unavailable, _run is not called.
     import tools.registry as reg
     set_active_scope(Scope.from_lines(["127.0.0.1/32"]))
     ran = []
-    monkeypatch.setattr(reg, "_run", lambda argv, timeout=120: ran.append(argv) or "exécuté")
+    monkeypatch.setattr(reg, "_run", lambda argv, timeout=120: ran.append(argv) or "executed")
     status, _out = ex.execute_command("nmap 127.0.0.1")
     assert status == "blocked_no_netns" and ran == []

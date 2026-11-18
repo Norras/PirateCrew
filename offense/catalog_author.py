@@ -1,5 +1,5 @@
-"""Auteur de catalogue LLM borné : le LLM (injecté) propose une technique,
-les garde-fous la valident, puis elle est persistée avec la mission."""
+"""Bounded LLM catalog author: the (injected) LLM proposes a technique,
+the guardrails validate it, then it is persisted with the mission."""
 from __future__ import annotations
 
 import hashlib
@@ -18,27 +18,27 @@ from state.mission_io import mission_dir
 
 
 def build_author_prompt(service: str, context: str) -> str:
-    """Consigne contrainte : un seul objet JSON, gabarit sans métacaractères."""
+    """Constrained instruction: a single JSON object, template without metacharacters."""
     return (
-        f"Propose UNE technique offensive pour le service « {service} », sur une "
-        "cible autorisée et dans le périmètre.\n"
-        f"État réel de la mission (tiens-en compte) :\n{context}\n\n"
-        "Ne propose PAS une technique listée comme déjà tentée ci-dessus ; "
-        "appuie-toi sur la version du service et sur les échecs observés.\n"
-        "Réponds par exactement UN objet JSON, sans autre texte, avec les clés : "
+        f"Propose ONE offensive technique for the \"{service}\" service, against an "
+        "authorized target and within scope.\n"
+        f"Actual mission state (take it into account):\n{context}\n\n"
+        "Do NOT propose a technique listed above as already attempted; "
+        "build on the service version and on the observed failures.\n"
+        "Reply with exactly ONE JSON object, with no other text, with the keys: "
         "id, name, domain, service, requires, tool, command_template, "
         "success_signal, opens_session.\n"
-        "command_template DOIT utiliser les placeholders {target} (hôte) {port} "
-        "{user} {password} (mot de passe en clair) {hash} (empreinte) {domain} "
-        "{share} et JAMAIS de valeur littérale (IP, identifiant, mot de passe) : "
-        "une technique à valeurs littérales n'est pas réutilisable.\n"
-        "INTERDIT : métacaractères shell (; | & > < ` $) et toute action "
-        "destructive (suppression, formatage, arrêt, déni de service)."
+        "command_template MUST use the placeholders {target} (host) {port} "
+        "{user} {password} (plaintext password) {hash} (hash) {domain} "
+        "{share} and NEVER a literal value (IP, username, password): "
+        "a technique with literal values is not reusable.\n"
+        "FORBIDDEN: shell metacharacters (; | & > < ` $) and any destructive "
+        "action (deletion, formatting, shutdown, denial of service)."
     )
 
 
 def parse_technique(raw: str) -> dict | None:
-    """Premier objet JSON complet de `raw` (prose/fences tolérées), sinon None."""
+    """First complete JSON object in `raw` (prose/fences tolerated), otherwise None."""
     if not isinstance(raw, str):
         return None
     try:
@@ -48,28 +48,28 @@ def parse_technique(raw: str) -> dict | None:
     return obj if isinstance(obj, dict) else None
 
 
-# Détection d'un hôte FORGÉ par collage d'un placeholder à un littéral
-# (`{target}.evil.com` → au rendu `10.0.0.5.evil.com`). Les accolades cassent la
-# classification d'hôte, donc `host_literals(gabarit)` ne voit rien ; on substitue
-# chaque placeholder par un label sentinelle, puis on relit les hôtes littéraux :
-# tout hôte matérialisé AUTRE que la sentinelle nue (= le placeholder seul en
-# position d'hôte, légitime) trahit un collage → évasion de périmètre au rendu.
+# Detection of a host FORGED by gluing a placeholder to a literal
+# (`{target}.evil.com` → at render time `10.0.0.5.evil.com`). The braces break
+# host classification, so `host_literals(template)` sees nothing; we substitute
+# each placeholder with a sentinel label, then re-read the literal hosts:
+# any materialized host OTHER than the bare sentinel (= the lone placeholder in
+# host position, legitimate) betrays a gluing → scope escape at render time.
 _PLACEHOLDER_RE = re.compile(r"\{[^{}]*\}")
-_TARGET_SENTINEL = "targetsentinelhost"              # {target} = seule place sanctionnée in-scope
-_OTHER_SENTINEL = "othersentinelhost"                # tout AUTRE placeholder
+_TARGET_SENTINEL = "targetsentinelhost"              # {target} = the only sanctioned in-scope spot
+_OTHER_SENTINEL = "othersentinelhost"                # any OTHER placeholder
 
 
 def _materialized_host_literals(template: str) -> list[str]:
-    """Hôtes RENDUS en position d'hôte qui ne sont PAS exactement {target}. Pur.
+    """RENDERED hosts in host position that are NOT exactly {target}. Pure.
 
-    Les accolades cassent la classification d'hôte, donc `host_literals(gabarit)` ne
-    voit rien. On substitue {target} par une sentinelle et TOUT AUTRE placeholder par
-    une sentinelle DISTINCTE, puis on relit les hôtes : tout hôte ≠ sentinelle {target}
-    nue — placeholder frère en position d'hôte ({domain}/{share}/{user}@), ou {target}
-    collé à un littéral / à un autre placeholder — trahit une position d'hôte non
-    sanctionnée (évasion de périmètre au rendu). Seul {target} est garanti in-scope ;
-    un placeholder NU hors position d'hôte (nmap {target} {domain}) reste un résiduel
-    assumé, comme un token nu."""
+    The braces break host classification, so `host_literals(template)` sees
+    nothing. We substitute {target} with a sentinel and EVERY OTHER placeholder
+    with a DISTINCT sentinel, then re-read the hosts: any host other than the bare
+    {target} sentinel — a sibling placeholder in host position ({domain}/{share}/{user}@),
+    or {target} glued to a literal / to another placeholder — betrays an
+    unsanctioned host position (scope escape at render time). Only {target} is
+    guaranteed in scope; a BARE placeholder outside a host position
+    (nmap {target} {domain}) remains an accepted residual, like a bare token."""
     def _sub(m: "re.Match[str]") -> str:
         return _TARGET_SENTINEL if m.group(0) == "{target}" else _OTHER_SENTINEL
     subbed = _PLACEHOLDER_RE.sub(_sub, template)
@@ -77,7 +77,7 @@ def _materialized_host_literals(template: str) -> list[str]:
     for cand, structured in _host_candidates(subbed):
         if _host_kind(cand, structured) is None:
             continue
-        if cand == _TARGET_SENTINEL:                 # {target} seul en position d'hôte : OK
+        if cand == _TARGET_SENTINEL:                 # {target} alone in host position: OK
             continue
         if cand not in out:
             out.append(cand)
@@ -88,10 +88,10 @@ _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
 def _well_typed(d: dict) -> bool:
-    """Types attendus des champs proposés par le LLM. Un champ mal typé (liste à
-    la place d'une chaîne, id non hachable ou en forme de chemin…) rend la
-    proposition inutilisable : elle est rejetée ici plutôt que de faire lever la
-    planification plus tard, à chaque cycle."""
+    """Expected types of the fields proposed by the LLM. A badly typed field (list
+    instead of a string, unhashable id or path-shaped id...) makes the
+    proposal unusable: it is rejected here rather than making planning
+    raise later, on every cycle."""
     if not isinstance(d.get("id"), str) or not _ID_RE.match(d["id"]):
         return False
     if not isinstance(d.get("command_template"), str) or not d["command_template"].strip():
@@ -108,11 +108,11 @@ def _well_typed(d: dict) -> bool:
 
 
 def author_technique(service: str, context: str, llm_invoke) -> Technique | None:
-    """Technique tagguée `llm` ou None si illisible / mal typée / gabarit refusé.
-    Ne lève jamais : un appel LLM en échec ou une réponse inattendue vaut None."""
+    """Technique tagged `llm`, or None if unreadable / badly typed / template refused.
+    Never raises: a failed LLM call or an unexpected response yields None."""
     try:
         d = parse_technique(llm_invoke(build_author_prompt(service, context)))
-    except Exception:  # noqa: BLE001 - API indisponible, réponse sans .content… : pas de proposition
+    except Exception:  # noqa: BLE001 - API unavailable, response without .content...: no proposal
         return None
     if d is None or not _well_typed(d):
         return None
@@ -122,23 +122,23 @@ def author_technique(service: str, context: str, llm_invoke) -> Technique | None
         tech = _technique_from_dict(d)
     except (KeyError, TypeError):
         return None
-    # Garde-fous d'authoring (défense en profondeur, en plus du contrôle à
-    # l'exécution) : pas de métacaractère/destructif ; la cible DOIT être le
-    # placeholder {target} (jamais une valeur en dur) ; aucun autre hôte/IP
-    # littéral (un second hôte littéral = évasion de périmètre à l'exécution).
+    # Authoring guardrails (defense in depth, on top of the execution-time check):
+    # no metacharacter/destructive content; the target MUST be the placeholder
+    # {target} (never a hard-coded value); no other literal host/IP
+    # (a second literal host = scope escape at execution time).
     tpl = tech.command_template or ""
     reject = None
     if shell_metachar(tpl) or destructive_match(tpl):
-        reject = "métacaractère shell ou action destructive"
+        reject = "shell metacharacter or destructive action"
     elif "{target}" not in tpl:
-        reject = "gabarit sans placeholder {target} (cible non garantie in-scope)"
+        reject = "template without {target} placeholder (target not guaranteed in scope)"
     elif host_literals(tpl):
-        reject = f"hôte/IP littéral interdit : {', '.join(host_literals(tpl))}"
+        reject = f"literal host/IP forbidden: {', '.join(host_literals(tpl))}"
     else:
         glued = _materialized_host_literals(tpl)
-        if glued:                                     # {target}.evil.com → hôte forgé au rendu
-            reject = ("placeholder collé à un hôte littéral (hôte forgé au rendu, "
-                      f"évasion de périmètre) : {', '.join(glued)}")
+        if glued:                                     # {target}.evil.com → host forged at render time
+            reject = ("placeholder glued to a literal host (host forged at render time, "
+                      f"scope escape): {', '.join(glued)}")
     if reject:
         try:
             from tools.registry import _audit
@@ -150,7 +150,7 @@ def author_technique(service: str, context: str, llm_invoke) -> Technique | None
 
 
 def persist_llm_technique(tech: Technique, mission_id: str, root=None) -> Path:
-    """Ajoute `tech` à missions/<id>/llm_catalog.yaml (relisible par le loader)."""
+    """Append `tech` to missions/<id>/llm_catalog.yaml (readable by the loader)."""
     d = mission_dir(mission_id, root)
     d.mkdir(parents=True, exist_ok=True)
     path = d / "llm_catalog.yaml"
@@ -167,33 +167,33 @@ def persist_llm_technique(tech: Technique, mission_id: str, root=None) -> Path:
 
 _IP_LITERAL = re.compile(
     r"\b\d{1,3}(?:\.\d{1,3}){3}\b"                      # IPv4
-    r"|::[0-9A-Fa-f]{0,4}"                               # IPv6 compressé (::1, fe80::1)
-    r"|(?:[0-9A-Fa-f]{1,4}:){4,}[0-9A-Fa-f]{0,4}"        # IPv6 non compressé / MAC (>=4 groupes)
+    r"|::[0-9A-Fa-f]{0,4}"                               # compressed IPv6 (::1, fe80::1)
+    r"|(?:[0-9A-Fa-f]{1,4}:){4,}[0-9A-Fa-f]{0,4}"        # uncompressed IPv6 / MAC (>=4 groups)
 )
-# La branche `::` sur-rejette un `::` isolé non-IP (ex. PowerShell [Ns]::Methode,
-# pwdump `user:::`) : sur-rejection ASSUMÉE (fail-safe). Resserrer risquerait un
-# faux NÉGATIF sur une vraie IPv6 — un trou, lui. On préfère sur-rejeter.
+# The `::` branch over-rejects a lone non-IP `::` (e.g. PowerShell [Ns]::Method,
+# pwdump `user:::`): over-rejection is ACCEPTED (fail-safe). Tightening it would risk a
+# FALSE NEGATIVE on a real IPv6 — a hole. We prefer to over-reject.
 
-# Jeton à forte entropie : empreinte/hash/clé/token probable. Volontairement
-# large (fail-closed) : hex >=16, ou base64 >=20 (couvre une clé de 16 octets,
-# ~22 car.). On n'inclut PAS `_`/`-` dans la classe base64 : ils joignent des
-# identifiants normaux (ex. NT_STATUS_LOGON_FAILURE) et provoqueraient un
-# sur-masquage / sur-rejet. base64url strict non couvert → résiduel assumé.
+# High-entropy token: probable hash/key/token. Deliberately
+# broad (fail-closed): hex >=16, or base64 >=20 (covers a 16-byte key,
+# ~22 chars). `_`/`-` are NOT included in the base64 class: they join normal
+# identifiers (e.g. NT_STATUS_LOGON_FAILURE) and would cause over-masking /
+# over-rejection. Strict base64url not covered → accepted residual.
 _HIGH_ENTROPY = re.compile(r"\b[0-9A-Fa-f]{16,}\b|[A-Za-z0-9+/]{20,}={0,2}")
 
-# Flags portant une valeur de credential : leur valeur DOIT être un {placeholder}
-# (un nombre est toléré : un port n'est pas un secret). Les formes courtes
-# `-p`/`-u` servent aussi de port/URL — `-H` (en-tête ou hash) est EXCLU car un
-# vrai hash est déjà capté par l'entropie, ce qui évite de rejeter `curl -H ...`.
+# Flags carrying a credential value: their value MUST be a {placeholder}
+# (a number is tolerated: a port is not a secret). The short forms
+# `-p`/`-u` also serve as port/URL — `-H` (header or hash) is EXCLUDED because a
+# real hash is already caught by entropy, which avoids rejecting `curl -H ...`.
 _CRED_FLAGS = frozenset({"-p", "--password", "--pass", "-passwd", "-pw",
                          "-hashes", "--hashes", "--hash",
                          "-u", "--user", "--username"})
 
 
 def _carries_target_data(text: str, forbidden) -> bool:
-    """Vrai si `text` porte une donnée de cible : IP littérale, jeton à forte
-    entropie (hash/clé/token), ou une chaîne interdite (secret/principal connu,
-    comparaison insensible à la casse). Fail-closed : en cas de doute, True."""
+    """True if `text` carries target data: literal IP, high-entropy token
+    (hash/key/token), or a forbidden string (known secret/principal,
+    case-insensitive comparison). Fail-closed: when in doubt, True."""
     if _IP_LITERAL.search(text) or _HIGH_ENTROPY.search(text):
         return True
     low = text.lower()
@@ -201,12 +201,12 @@ def _carries_target_data(text: str, forbidden) -> bool:
 
 
 def _flag_value_is_literal(template: str) -> bool:
-    """Vrai si un flag porteur de credential est suivi d'une valeur LITTÉRALE
-    (ni {placeholder} ni nombre/port) — gabarit spécifique à la mission."""
+    """True if a credential-carrying flag is followed by a LITERAL value
+    (neither a {placeholder} nor a number/port) — a mission-specific template."""
     try:
         argv = tokenize_argv(template)
     except GuardrailError:
-        return True  # non tokenisable → fail-closed
+        return True  # cannot be tokenized → fail-closed
     for i in range(len(argv) - 1):
         val = argv[i + 1]
         if argv[i] in _CRED_FLAGS and "{" not in val and not val.isdigit():
@@ -215,44 +215,44 @@ def _flag_value_is_literal(template: str) -> bool:
 
 
 def _rag_candidate(t, forbidden) -> dict | None:
-    """Ce qui serait stocké pour `t` ({id, text, metadata}), ou None si le filtre
-    l'écarte. Peut lever sur une technique mal formée (géré par l'appelant)."""
-    reqs = ", ".join(sorted(t.requires)) if t.requires else "aucun"
+    """What would be stored for `t` ({id, text, metadata}), or None if the filter
+    discards it. May raise on a malformed technique (handled by the caller)."""
+    reqs = ", ".join(sorted(t.requires)) if t.requires else "none"
     text = (
-        f"Technique « {t.name} » pour le service {t.service} "
-        f"(outil {t.tool or '?'}). Commande : {t.command_template}. "
-        f"Signal de succès : {t.success_signal or '?'}. Prérequis : {reqs}. "
-        f"Ouvre une session : {t.opens_session}. Source : auteur LLM."
+        f"Technique \"{t.name}\" for the {t.service} service "
+        f"(tool {t.tool or '?'}). Command: {t.command_template}. "
+        f"Success signal: {t.success_signal or '?'}. Prerequisites: {reqs}. "
+        f"Opens a session: {t.opens_session}. Source: LLM author."
     )
     meta = {"source": "llm_authored", "service": t.service,
             "technique_id": t.id, "tool": t.tool or ""}
-    # Scan de TOUT le contenu persisté (page_content + metadata), pas d'un
-    # sous-ensemble de champs.
+    # Scan ALL persisted content (page_content + metadata), not a
+    # subset of fields.
     scanned = text + " " + " ".join(str(v) for v in meta.values())
     if _carries_target_data(scanned, forbidden) or _flag_value_is_literal(t.command_template):
-        return None  # spécifique à la mission → jamais dans le RAG partagé
+        return None  # mission-specific → never in the shared RAG
     digest = hashlib.sha1(
         f"{t.service}|{t.command_template}".encode("utf-8")).hexdigest()[:16]
     return {"id": f"llm:{digest}", "text": text, "metadata": meta}
 
 
 def rag_candidates(techniques, forbidden=()) -> list[dict]:
-    """Candidats à la promotion RAG : `[{id, text, metadata}]`, exactement ce qui
-    serait écrit. N'écrit rien.
+    """RAG promotion candidates: `[{id, text, metadata}]`, exactly what would be
+    written. Writes nothing.
 
-    Filtre de PRÉ-TRI, pas une garantie : est écartée toute technique dont le
-    contenu porte une IP littérale, un jeton à forte entropie (hash/clé/token),
-    une chaîne de `forbidden` (secrets, principals, noms d'hôte connus —
-    insensible à la casse), ou une valeur LITTÉRALE après un flag de credential.
-    Il ne reconnaît PAS toute donnée de cible : nom ou identifiant vu dans une
-    sortie d'outil mais absent de `forbidden`, valeur de moins de 3 caractères,
-    forme encodée, valeur attachée (--user=…), userinfo d'URL, argument
-    positionnel. La garantie est l'accord de l'opérateur, qui relit ces textes
-    avant écriture (commande « promote » du REPL).
+    A PRE-SORT filter, not a guarantee: any technique whose content carries a
+    literal IP, a high-entropy token (hash/key/token), a `forbidden` string
+    (secrets, principals, known hostnames — case-insensitive), or a LITERAL
+    value after a credential flag is discarded. It does NOT recognize all target
+    data: a name or identifier seen in tool output but absent from `forbidden`,
+    a value under 3 characters, an encoded form, an attached value (--user=...),
+    URL userinfo, a positional argument. The guarantee is the operator's
+    approval: they review these texts before writing (REPL "promote" command).
 
-    Une technique mal formée (champ non textuel…) est écartée seule, sans lever
-    ni faire perdre le lot ; deux techniques de même (service, gabarit) ne
-    donnent qu'un candidat (id stable = hash(service|gabarit) → upsert idempotent).
+    A malformed technique (non-text field...) is discarded on its own, without
+    raising or losing the batch; two techniques with the same (service, template)
+    yield a single candidate (stable id = hash(service|template) → idempotent
+    upsert).
     """
     forbidden = [f for f in forbidden if isinstance(f, str)]
     out: list[dict] = []
@@ -260,7 +260,7 @@ def rag_candidates(techniques, forbidden=()) -> list[dict]:
     for t in techniques or []:
         try:
             cand = _rag_candidate(t, forbidden)
-        except Exception:  # noqa: BLE001 - fail-closed par technique : écartée, jamais écrite
+        except Exception:  # noqa: BLE001 - fail-closed per technique: discarded, never written
             cand = None
         if cand is None or cand["id"] in seen:
             continue
@@ -270,12 +270,12 @@ def rag_candidates(techniques, forbidden=()) -> list[dict]:
 
 
 def store_candidates(candidates, store=None) -> int:
-    """Écrit des candidats (issus de `rag_candidates`) dans le RAG partagé, en un
-    appel. `store=None` → import paresseux du vectorstore. Renvoie le nombre écrit."""
+    """Write candidates (from `rag_candidates`) to the shared RAG, in a single
+    call. `store=None` → lazy import of the vectorstore. Returns the number written."""
     if not candidates:
         return 0
     if store is None:
-        from agents.pirate_agent import vectorstore as store  # import paresseux
+        from agents.pirate_agent import vectorstore as store  # lazy import
     store.add_texts([c["text"] for c in candidates],
                     metadatas=[c["metadata"] for c in candidates],
                     ids=[c["id"] for c in candidates])
@@ -283,10 +283,11 @@ def store_candidates(candidates, store=None) -> int:
 
 
 def promote_techniques_to_rag(techniques, mission_id: str, forbidden=(), store=None) -> int:
-    """Filtre (`rag_candidates`) puis écrit (`store_candidates`) en une fois.
-    `mission_id` est accepté mais volontairement ABSENT de ce qui est stocké (il
-    contient l'IP cible). Renvoie le nombre promu.
+    """Filter (`rag_candidates`) then write (`store_candidates`) in one go.
+    `mission_id` is accepted but deliberately ABSENT from what is stored (it
+    contains the target IP). Returns the number promoted.
 
-    Le REPL ne l'appelle plus en fin de mission : il passe par `rag_candidates`,
-    montre les textes à l'opérateur et n'écrit que sur son ordre."""
+    The REPL no longer calls it at the end of a mission: it goes through
+    `rag_candidates`, shows the texts to the operator and writes only on their
+    command."""
     return store_candidates(rag_candidates(techniques, forbidden), store=store)

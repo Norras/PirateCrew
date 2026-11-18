@@ -8,7 +8,7 @@ from state import mission_io
 def test_new_mission_id_sanitises_target():
     mid = mission_io.new_mission_id("127.0.0.1")
     assert mid.startswith("127.0.0.1-") and ":" not in mid and "/" not in mid
-    assert ":" not in mission_io.new_mission_id("fe80::1")  # IPv6 assaini
+    assert ":" not in mission_io.new_mission_id("fe80::1")  # IPv6 sanitized
 
 
 def test_save_world_writes_json(tmp_path):
@@ -33,11 +33,11 @@ def test_render_report_lists_findings():
     md = mission_io.render_report(wm)
     for token in ("10.10.10.5", "445", "smb", "admin", "pw123"):
         assert token in md
-    assert "en attente" in md.lower()  # session non autorisée
+    assert "pending" in md.lower()  # unauthorized session
 
 
 def test_save_report_writes_markdown(tmp_path):
     wm = WorldModel(scope=Scope.from_lines(["10.10.10.0/24"]))
     p = mission_io.save_report(wm, "m1", root=tmp_path)
-    assert p == tmp_path / "m1" / "rapport.md"
+    assert p == tmp_path / "m1" / "report.md"
     assert p.read_text(encoding="utf-8") == mission_io.render_report(wm)

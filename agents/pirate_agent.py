@@ -17,46 +17,46 @@ DB_DIR = "./chroma_db"
 embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-m3")
 vectorstore = Chroma(persist_directory=DB_DIR, embedding_function=embeddings)
 
-# Retrait de la temperature
+# Temperature removed
 llm = ChatAnthropic(model="claude-sonnet-4-6")
 
 def node_router(state: PirateAgentState) -> Literal["retrieve", "direct_generate"]:
-    print("[+] Exécution du nœud : Routeur LLM intelligent...")
+    print("[+] Running node: smart LLM router...")
     question = state["question"]
-    
-    prompt = f"""Analyse la question de l'utilisateur ci-dessous et détermine si elle nécessite de consulter la base de documentation technique interne (cours de cybersécurité/pentest Active Directory) ou si c'est une question générale, une salutation ou une discussion basique.
 
-Réponds **uniquement** par un seul mot :
-- "retrieve" si la question touche à la technique, aux attaques, aux protocoles, aux configurations ou aux cours HTB.
-- "direct_generate" si c'est une salutation, une question générale ou hors technique.
+    prompt = f"""Analyze the user's question below and decide whether it requires consulting the internal technical documentation base (cybersecurity / Active Directory pentest courses) or whether it is a general question, a greeting or basic chit-chat.
 
-Question : {question}
-Décision (retrieve/direct_generate) :"""
+Answer with **only** a single word:
+- "retrieve" if the question concerns technique, attacks, protocols, configurations or HTB courses.
+- "direct_generate" if it is a greeting, a general question or off-topic (non-technical).
+
+Question: {question}
+Decision (retrieve/direct_generate):"""
 
     response = llm.invoke(prompt)
     decision = response.content.strip().lower()
     
     if "direct_generate" in decision:
-        print(" -> Route choisie : Génération directe (hors RAG)")
+        print(" -> Route chosen: direct generation (no RAG)")
         return "direct_generate"
     else:
-        print(" -> Route choisie : Recherche RAG (ChromaDB)")
+        print(" -> Route chosen: RAG search (ChromaDB)")
         return "retrieve"
 
 def node_retrieve(state: PirateAgentState):
-    print("[+] Exécution du nœud : Recherche vectorielle (ChromaDB)...")
+    print("[+] Running node: vector search (ChromaDB)...")
     docs = vectorstore.similarity_search(state["question"], k=3)
     return {"documents": [doc.page_content for doc in docs]}
 
 def node_generate(state: PirateAgentState):
-    print("[+] Exécution du nœud : Génération de la réponse (Claude)...")
+    print("[+] Running node: answer generation (Claude)...")
     docs = state.get("documents", [])
-    contexte = "\n\n---\n\n".join(docs) if docs else "Aucun document contextuel fourni."
+    contexte = "\n\n---\n\n".join(docs) if docs else "No contextual document provided."
 
-    prompt = f"""Tu es PirateCrew, un assistant expert en cybersécurité et pentest.
-Réponds à la question de l'utilisateur en t'appuyant rigoureusement sur le contexte technique fourni si disponible.
+    prompt = f"""You are PirateCrew, an expert assistant in cybersecurity and pentesting.
+Answer the user's question, relying strictly on the technical context provided if available.
 
-=== DOCUMENTATION SOURCE (RAG) ===
+=== SOURCE DOCUMENTATION (RAG) ===
 {contexte}
 
 === QUESTION ===
@@ -66,8 +66,8 @@ Réponds à la question de l'utilisateur en t'appuyant rigoureusement sur le con
     return {"generation": reponse.content}
 
 def _build_routed_graph():
-    """Graphe autonome : le routeur LLM décide retrieve vs direct_generate.
-    Utile quand le pirate_agent est appelé seul (sans orchestrateur en amont)."""
+    """Standalone graph: the LLM router decides retrieve vs direct_generate.
+    Useful when pirate_agent is called on its own (no orchestrator upstream)."""
     wf = StateGraph(PirateAgentState)
     wf.add_node("retrieve", node_retrieve)
     wf.add_node("generate", node_generate)
@@ -82,9 +82,9 @@ def _build_routed_graph():
 
 
 def _build_direct_graph():
-    """Graphe pour la délégation depuis l'orchestrateur : RAG direct, SANS routeur.
-    Le superviseur maître a déjà décidé que la question est technique → inutile de
-    re-router ici. On économise un appel LLM (retrieve → generate directement)."""
+    """Graph for delegation from the orchestrator: direct RAG, NO router.
+    The master supervisor has already decided the question is technical, so there is
+    no need to re-route here. This saves an LLM call (retrieve → generate directly)."""
     wf = StateGraph(PirateAgentState)
     wf.add_node("retrieve", node_retrieve)
     wf.add_node("generate", node_generate)
@@ -94,6 +94,6 @@ def _build_direct_graph():
     return wf.compile()
 
 
-# Deux graphes, mêmes nœuds, entrées différentes.
-pirate_graph = _build_routed_graph()         # usage autonome (avec routeur)
-pirate_graph_direct = _build_direct_graph()  # usage via orchestrateur (sans routeur)
+# Two graphs, same nodes, different entry points.
+pirate_graph = _build_routed_graph()         # standalone use (with router)
+pirate_graph_direct = _build_direct_graph()  # use via orchestrator (no router)

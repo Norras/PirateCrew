@@ -1,6 +1,6 @@
-# Techniques builtin — web (fingerprint HTTP, non sensible).
+# Builtin techniques — web (HTTP fingerprint, non-sensitive).
 - id: http.fingerprint
-  name: Fingerprint HTTP (code + en-têtes révélateurs)
+  name: HTTP fingerprint (status code + revealing headers)
   domain: web
   service: http
   requires: []
@@ -9,7 +9,7 @@
   success_signal: "HTTP"
   provided_by: builtin
 - id: http.get
-  name: Lecture de contenu HTTP (corps, listing de répertoire, fichier servi)
+  name: HTTP content read (body, directory listing, served file)
   domain: web
   service: http
   requires: []
@@ -18,7 +18,7 @@
   success_signal: "HTTP"
   provided_by: builtin
 - id: http.harvest
-  name: Lecture du contenu listé (index + fichiers exposés)
+  name: Read listed content (index + exposed files)
   domain: web
   service: http
   requires: []

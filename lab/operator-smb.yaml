@@ -1,17 +1,17 @@
-# Gabarit OPERATOR du lab PirateCrew — accès authentifié au partage SMB protégé.
+# PirateCrew lab OPERATOR template - authenticated access to the protected SMB share.
 #
-# Ferme la boucle du lab : le mot de passe de « svc-sauvegarde », laissé par l'intranet
-# dans sauvegardes/intranet.conf.bak, ouvre le partage « archives » (refusé en anonyme).
-# C'est l'étape déterministe que l'auteur LLM ne peut pas produire de façon fiable (son
-# gabarit doit rester générique et sans valeur littérale).
+# Closes the lab loop: the password of "svc-sauvegarde", left by the intranet in
+# sauvegardes/intranet.conf.bak, opens the "archives" share (denied anonymously).
+# This is the deterministic step the LLM author cannot produce reliably (its
+# template has to stay generic and free of literal values).
 #
-# Pour l'activer — l'arsenal operator reste LOCAL (catalog/operator/*.yaml non versionné) :
+# To enable it - the operator arsenal stays LOCAL (catalog/operator/*.yaml is not versioned):
 #     cp lab/operator-smb.yaml catalog/operator/smb.yaml
 #
-# La commande s'exécute dans le namespace réseau filtré, en argv (shell=False) : le
-# « % » et le « ! » du couple user%password ne sont pas interprétés par un shell.
+# The command runs in the filtered network namespace, as argv (shell=False): the
+# "%" and "!" of the user%password pair are not interpreted by a shell.
 - id: smb.auth_share_archives
-  name: Accès authentifié au partage SMB protégé (archives)
+  name: Authenticated access to the protected SMB share (archives)
   domain: ad
   service: smb
   requires: [credential]

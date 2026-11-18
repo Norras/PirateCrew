@@ -1,14 +1,14 @@
-"""Chargement du catalogue d'attaques enfichable de PirateCrew.
+"""Loading of PirateCrew's pluggable attack catalog.
 
-Chaque technique est une entrée déclarative (YAML) : quoi lancer sur quel
-service, avec quels prérequis, et comment reconnaître un succès.
+Each technique is a declarative (YAML) entry: what to run against which
+service, with which prerequisites, and how to recognize success.
 
-- `builtin` : énumération standard non sensible, fournie avec le projet.
-- `operator` : techniques offensives précises, livrées en **gabarit vide** et
-  remplies par l'opérateur dans `catalog/operator/` (non versionné). Voir
+- `builtin`: standard, non-sensitive enumeration, shipped with the project.
+- `operator`: specific offensive techniques, shipped as an **empty template**
+  and filled in by the operator in `catalog/operator/` (not versioned). See
   `catalog/operator.example.yaml`.
 
-Le loader ne fait que lire des données ; il n'exécute rien.
+The loader only reads data; it executes nothing.
 """
 from __future__ import annotations
 
@@ -23,13 +23,13 @@ class Technique:
     id: str
     name: str
     domain: str            # recon|web|ad|credentials|exploitation|post
-    service: str           # ex. "smb", "http", "kerberos", "*" (transverse)
-    requires: set[str]     # ex. {"credential"} ou {"session"} ou set()
-    tool: str              # binaire/outil attendu
-    command_template: str  # gabarit ; placeholders {target} {user} {hash} ...
-    success_signal: str    # motif indiquant le succès dans la sortie
+    service: str           # e.g. "smb", "http", "kerberos", "*" (cross-cutting)
+    requires: set[str]     # e.g. {"credential"} or {"session"} or set()
+    tool: str              # expected binary/tool
+    command_template: str  # template; placeholders {target} {user} {hash} ...
+    success_signal: str    # pattern indicating success in the output
     provided_by: str       # "builtin" | "operator"
-    opens_session: bool = False  # la réussite ouvre une session (non autorisée par défaut)
+    opens_session: bool = False  # success opens a session (unauthorized by default)
 
 
 def _technique_from_dict(entry: dict) -> Technique:
@@ -49,8 +49,8 @@ def _technique_from_dict(entry: dict) -> Technique:
 
 
 def _load_dir(path: str) -> list[Technique]:
-    """Charge toutes les techniques des `*.yaml` d'un dossier. Dossier absent
-    ⇒ liste vide (jamais d'exception)."""
+    """Load all techniques from a directory's `*.yaml` files. Missing directory
+    ⇒ empty list (never an exception)."""
     directory = Path(path)
     if not directory.is_dir():
         return []
@@ -65,19 +65,19 @@ def _load_dir(path: str) -> list[Technique]:
 
 def load_catalog(builtin_dir: str = "catalog/builtin",
                  operator_dir: str = "catalog/operator") -> list[Technique]:
-    """Catalogue complet = techniques `builtin` + `operator`.
-    `operator_dir` absent ou vide ⇒ seules les `builtin` sont renvoyées."""
+    """Full catalog = `builtin` + `operator` techniques.
+    Missing or empty `operator_dir` ⇒ only the `builtin` ones are returned."""
     return _load_dir(builtin_dir) + _load_dir(operator_dir)
 
 
 def techniques_for(catalog: list[Technique], service: str) -> list[Technique]:
-    """Techniques déclarées pour un service donné, plus les transverses (`service: "*"`)."""
+    """Techniques declared for a given service, plus the cross-cutting ones (`service: "*"`)."""
     return [t for t in catalog if t.service in (service, "*")]
 
 
 def technique_by_id(catalog: list[Technique], tech_id: str) -> Technique:
-    """Technique par identifiant. Lève `KeyError` si inconnue."""
+    """Technique by identifier. Raises `KeyError` if unknown."""
     for t in catalog:
         if t.id == tech_id:
             return t
-    raise KeyError(f"technique inconnue : {tech_id}")
+    raise KeyError(f"unknown technique: {tech_id}")

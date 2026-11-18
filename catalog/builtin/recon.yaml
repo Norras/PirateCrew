@@ -1,9 +1,9 @@
-# Techniques builtin — reconnaissance (énumération standard, non sensible).
-# La reconnaissance est faite par la phase recon de la mission, pas planifiée par
-# service : `service: recon` (aucun service découvert ne porte ce nom). Avec « * »,
-# ces techniques seraient relancées sur chaque service découvert.
+# Builtin techniques — reconnaissance (standard, non-sensitive enumeration).
+# Reconnaissance is done by the mission's recon phase, not planned per
+# service: `service: recon` (no discovered service has that name). With "*",
+# these techniques would be re-run on every discovered service.
 - id: nmap.quick
-  name: Scan nmap rapide
+  name: Quick nmap scan
   domain: recon
   service: recon
   requires: []
@@ -13,11 +13,11 @@
   provided_by: builtin
 
 - id: tcp.check
-  name: Test de port TCP (socket pur Python)
+  name: TCP port check (pure-Python socket)
   domain: recon
   service: recon
   requires: []
   tool: tcp_port_check
   command_template: ""
-  success_signal: "OUVERT"
+  success_signal: "OPEN"
   provided_by: builtin

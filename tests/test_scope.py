@@ -12,7 +12,7 @@ def test_load_scope_missing_file_raises(tmp_path):
 
 
 def test_load_scope_empty_raises(tmp_path):
-    p = tmp_path / "scope.txt"; p.write_text("\n# commentaire\n", encoding="utf-8")
+    p = tmp_path / "scope.txt"; p.write_text("\n# comment\n", encoding="utf-8")
     with pytest.raises(ScopeError):
         load_scope(str(p))
 
@@ -92,7 +92,7 @@ def test_hosts_respects_max_hosts():
 
 
 def test_resolution_cache_avoids_second_dns(monkeypatch):
-    # Résolution mise en cache par mission : un même nom n'est résolu qu'une fois.
+    # Resolution cached per mission: a given name is resolved only once.
     set_active_scope(Scope.from_lines(["10.0.0.0/24"]))
     calls = []
     def fake(name):
@@ -105,7 +105,7 @@ def test_resolution_cache_avoids_second_dns(monkeypatch):
 
 
 def test_set_active_scope_clears_resolution_cache(monkeypatch):
-    # Une nouvelle mission (nouveau périmètre) vide le cache : pas de résolution périmée.
+    # A new mission (new scope) clears the cache: no stale resolution.
     set_active_scope(Scope.from_lines(["10.0.0.0/24"]))
     monkeypatch.setattr(scope.socket, "gethostbyname", lambda n: "10.0.0.5")
     assert assert_in_scope("host.lab") == "10.0.0.5"
@@ -115,7 +115,7 @@ def test_set_active_scope_clears_resolution_cache(monkeypatch):
 
 
 def test_resolution_times_out_fail_closed(monkeypatch):
-    # Résolveur lent/bloqué -> borné par un timeout -> non résolu -> hors périmètre (fail-closed).
+    # Slow/blocked resolver -> bounded by a timeout -> unresolved -> out of scope (fail-closed).
     import time
     set_active_scope(Scope.from_lines(["10.0.0.0/24"]))
     monkeypatch.setattr(scope, "_DNS_TIMEOUT", 0.2)

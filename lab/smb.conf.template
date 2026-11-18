@@ -1,0 +1,42 @@
+# Samba configuration template for the lab - filled in by lab/start.sh
+# (@DATA@ = working directory, @RUN_AS@ = user running the service).
+# smbd runs without root: all its state directories live in @DATA@/samba.
+[global]
+   workgroup = SEPTMERS
+   server string = Trading Post file server (lab)
+   netbios name = SRV-INTRANET
+   server role = standalone server
+   interfaces = 192.0.2.2/30
+   bind interfaces only = yes
+   smb ports = 445
+   disable netbios = yes
+   map to guest = Bad User
+   guest account = @RUN_AS@
+   # The fictional svc-sauvegarde account is carried by the user running smbd:
+   # no system account is created.
+   passdb backend = tdbsam:@DATA@/samba/private/passdb.tdb
+   username map = @DATA@/samba/accounts.map
+   load printers = no
+   printing = bsd
+   printcap name = /dev/null
+   disable spoolss = yes
+   log file = @DATA@/samba/smbd.log
+   lock directory = @DATA@/samba/lock
+   state directory = @DATA@/samba/state
+   cache directory = @DATA@/samba/cache
+   pid directory = @DATA@/samba/pid
+   private dir = @DATA@/samba/private
+   ncalrpc dir = @DATA@/samba/ncalrpc
+
+[public]
+   comment = Public share
+   path = @DATA@/partage/public
+   guest ok = yes
+   read only = yes
+
+[archives]
+   comment = Accounting archives
+   path = @DATA@/partage/archives
+   guest ok = no
+   valid users = @RUN_AS@
+   read only = yes

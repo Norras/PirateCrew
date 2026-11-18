@@ -1,304 +1,304 @@
 # 🏴‍☠️ PirateCrew
 
-Plateforme d'**orchestration multi-agents** (Python / LangGraph) pour conduire des
-**audits de sécurité autorisés** de façon autonome et traçable. Un périmètre
-d'autorisation **fail-closed** est au cœur de l'architecture.
+**Multi-agent orchestration** platform (Python / LangGraph) for running **authorized
+security audits** autonomously and traceably. A **fail-closed** authorization scope sits
+at the heart of the architecture.
 
-> ⚠️ **Usage strictement autorisé.** PirateCrew n'agit que sur les cibles d'une liste
-> blanche (`scope.txt`) que vous **possédez** ou avez le **droit explicite** de tester
-> (lab d'entraînement, VM perso, périmètre d'audit consenti). Sans périmètre valide,
-> **aucune mission ne démarre**. Vous êtes seul responsable de l'usage que vous en faites.
+> ⚠️ **Authorized use only.** PirateCrew only acts on targets from an allowlist
+> (`scope.txt`) that you **own** or have **explicit permission** to test (training lab,
+> personal VM, agreed audit scope). Without a valid scope, **no mission starts**. You are
+> solely responsible for how you use it.
 
 ---
 
-## Sommaire
-- [Ce que c'est](#ce-que-cest)
-- [Sécurité (fail-closed)](#sécurité-fail-closed)
-- [Prérequis](#prérequis)
+## Table of contents
+- [What it is](#what-it-is)
+- [Security (fail-closed)](#security-fail-closed)
+- [Prerequisites](#prerequisites)
 - [Installation](#installation)
-- [Lancement](#lancement)
-- [Comment ça marche](#comment-ça-marche)
-- [Outils & catalogue](#outils--catalogue)
-- [Environnement recommandé (Kali)](#environnement-recommandé-kali)
+- [Running](#running)
+- [How it works](#how-it-works)
+- [Tools & catalog](#tools--catalog)
+- [Recommended environment (Kali)](#recommended-environment-kali)
 - [Tests](#tests)
-- [Structure du projet](#structure-du-projet)
-- [État du projet](#état-du-projet)
+- [Project structure](#project-structure)
+- [Project status](#project-status)
+- [License](#license)
 
 ---
 
-## Ce que c'est
+## What it is
 
-Un orchestrateur à état qui coordonne plusieurs agents LLM spécialisés :
+A stateful orchestrator that coordinates several specialized LLM agents:
 
-- un **superviseur maître** route chaque requête vers la bonne stratégie : mission
-  autonome, base de connaissances (RAG), analyse de code, ou réponse directe ;
-- une **mission autonome** déroule une boucle **bornée** *reconnaissance → décision →
-  exécution → intégration* (arrêt garanti : plafond de cycles + épuisement des tâches) ;
-- un **modèle du terrain** partagé (`WorldModel`) centralise hôtes, services,
-  identifiants, sessions, preuves et le **registre des techniques déjà tentées** ;
-- un **catalogue YAML enfichable** décrit les techniques de façon déclarative ;
-- une **base de connaissances RAG** (Chroma + embeddings) enrichit le raisonnement.
+- a **master supervisor** routes each request to the right strategy: autonomous
+  mission, knowledge base (RAG), code analysis, or direct answer;
+- an **autonomous mission** runs a **bounded** loop *recon → decision →
+  execution → integration* (guaranteed to stop: cycle cap + task exhaustion);
+- a shared **world model** (`WorldModel`) centralizes hosts, services,
+  credentials, sessions, evidence and the **ledger of techniques already attempted**;
+- a **pluggable YAML catalog** describes techniques declaratively;
+- a **RAG knowledge base** (Chroma + embeddings) enriches the reasoning.
 
-Les agents sont construits à la volée (pattern *factory*) et ne reçoivent que les
-outils de leur domaine, plus les outils obligatoires (audit + vérification de périmètre).
+Agents are built on the fly (*factory* pattern) and only receive the tools of their
+domain, plus the mandatory tools (audit + scope check).
 
-## Sécurité (fail-closed)
+## Security (fail-closed)
 
-- Pas de `scope.txt` valide → la mission **refuse de démarrer**. Aucune action par défaut.
-- **Point de contrôle unique** : toute cible, quel que soit l'outil, passe par
-  `_validate_target` → `assert_in_scope` (filtre syntaxique + appartenance au périmètre).
-  Aucun outil ne peut toucher une cible hors de la liste blanche.
-- On contacte l'**IP validée** par le périmètre, jamais un nom ré-résolu
-  (protection contre le détournement DNS).
-- Chaque action est horodatée dans `audit.log` : périmètre, recon, décision de
-  planification, exécution de technique (`EXEC`) et trouvailles (`FINDING`). Les sauts
-  de ligne y sont neutralisés (anti-forge de fausses lignes). **`audit.log` ne contient
-  jamais de secret** : ni mot de passe, ni commande rendue, ni contenu de butin — seuls
-  des champs structurels (technique, hôte, port, service, principal, statut).
+- No valid `scope.txt` → the mission **refuses to start**. No default action.
+- **Single checkpoint**: every target, whatever the tool, goes through
+  `_validate_target` → `assert_in_scope` (syntactic filter + scope membership).
+  No tool can touch a target outside the allowlist.
+- The **IP validated** by the scope is contacted, never a re-resolved name
+  (protection against DNS hijacking).
+- Every action is timestamped in `audit.log`: scope, recon, planning decision,
+  technique execution (`EXEC`) and findings (`FINDING`). Line breaks are neutralized
+  there (protection against forged log lines). **`audit.log` never contains a
+  secret**: no password, no rendered command, no loot content - only structural fields
+  (technique, host, port, service, principal, status).
 
-### Périmètre réseau (chemin offensif)
+### Network scope (offensive path)
 
-Les techniques `operator` et `llm` sont des gabarits de commande : aucun contrôle sur le
-*texte* d'une commande ne peut dire de façon fiable où l'outil va se connecter (IP décimale,
-hexadécimale, point final, URL tordue…). Pour ce chemin, c'est donc le **noyau** qui applique
-le périmètre : la commande s'exécute dans un *network namespace* (`pc-offense`) dont la seule
-sortie est filtrée par nftables sur les IP de `scope.txt`. L'écriture de l'hôte n'a plus
-d'importance.
+The `operator` and `llm` techniques are command templates: no check on the *text* of a
+command can reliably tell where the tool will connect (decimal IP, hexadecimal, trailing
+dot, twisted URL...). For this path, it is therefore the **kernel** that enforces the
+scope: the command runs in a *network namespace* (`pc-offense`) whose only exit is
+filtered by nftables on the IPs of `scope.txt`. How the host is written no longer
+matters.
 
 ```bash
-sudo python -m offense.netns up            # à relancer après toute modification de scope.txt
-sudo python -m offense.netns up --dns IP   # idem, avec un résolveur in-scope (ex. un DC)
-python -m offense.netns status             # ce que le noyau autorise réellement
+sudo python -m offense.netns up            # re-run after any change to scope.txt
+sudo python -m offense.netns up --dns IP   # same, with an in-scope resolver (e.g. a DC)
+python -m offense.netns status             # what the kernel actually allows
 sudo python -m offense.netns down
 ```
 
-- **Fail-closed, sans contournement** : si le namespace est absent, ou si le set du noyau
-  n'est pas exactement le périmètre actif, la technique n'est pas exécutée
-  (`blocked_no_netns`), n'est pas « grillée » dans le ledger, et l'opérateur est prévenu.
-  La reconnaissance et les outils builtin restent utilisables (ils contactent déjà l'IP
-  validée).
-- **Linux uniquement, root pour la mise en place.** `up` installe un script d'aide
-  (`/usr/local/sbin/pc-netns-exec`) et une règle sudoers limitée à ce script ; la commande
-  s'exécute ensuite avec **vos** privilèges, pas en root. `up` active
-  `net.ipv4.ip_forward`, que `down` ne remet pas à zéro.
-- **DNS fermé par défaut** dans le namespace (`/etc/hosts` reste visible) ; services de la
-  machine elle-même (loopback, IP locales) injoignables ; IPv6 désactivé.
-- **Un périmètre `127.0.0.1` est donc injoignable par ce chemin** : dans le namespace, la
-  boucle locale est celle du namespace, vide. `up` et la porte de mission l'annoncent
-  (`[NETNS] Attention : …`). La reconnaissance et les outils builtin, eux, atteignent
-  toujours `127.0.0.1`. Pour un lab local, donnez à la cible sa propre adresse — voir
-  [Lab local](#lab-local) ci-dessous.
-- Le lien interne hôte ↔ namespace utilise `100.127.77.0/30` (plage partagée des
-  opérateurs, hors plages privées) : seul un périmètre qui chevauche cette plage est refusé.
+- **Fail-closed, no bypass**: if the namespace is missing, or if the kernel set is not
+  exactly the active scope, the technique is not executed (`blocked_no_netns`), is not
+  "burned" in the ledger, and the operator is warned. Recon and the builtin tools stay
+  usable (they already contact the validated IP).
+- **Linux only, root for setup.** `up` installs a helper script
+  (`/usr/local/sbin/pc-netns-exec`) and a sudoers rule limited to that script; the command
+  then runs with **your** privileges, not as root. `up` enables
+  `net.ipv4.ip_forward`, which `down` does not reset.
+- **DNS closed by default** in the namespace (`/etc/hosts` stays visible); services of the
+  machine itself (loopback, local IPs) are unreachable; IPv6 is disabled.
+- **A `127.0.0.1` scope is therefore unreachable through this path**: inside the namespace,
+  the loopback is the namespace's own, and it is empty. `up` and the mission gate announce
+  it (`[NETNS] Warning: ...`). Recon and the builtin tools, for their part, still reach
+  `127.0.0.1`. For a local lab, give the target its own address - see
+  [Local lab](#local-lab) below.
+- The internal host ↔ namespace link uses `100.127.77.0/30` (carrier-grade shared range,
+  outside the private ranges): only a scope that overlaps this range is rejected.
 
-#### Lab local
+#### Local lab
 
-Pour s'exercer sur un service qui tourne sur la machine elle-même, lancez-le dans un second
-namespace (`pc-lab`) qui a sa propre adresse, `192.0.2.2` (plage de documentation, jamais
-routée sur Internet) :
+To practise on a service running on the machine itself, start it in a second
+namespace (`pc-lab`) that has its own address, `192.0.2.2` (documentation range, never
+routed on the Internet):
 
 ```bash
-sudo python -m offense.lab up                                   # crée la cible 192.0.2.2
-sudo python -m offense.lab run -- python3 -m http.server 8000   # votre service, au premier plan
-# dans scope.txt : 192.0.2.2   puis : sudo python -m offense.netns up
+sudo python -m offense.lab up                                   # creates the 192.0.2.2 target
+sudo python -m offense.lab run -- python3 -m http.server 8000   # your service, in the foreground
+# in scope.txt: 192.0.2.2   then: sudo python -m offense.netns up
 sudo python -m offense.lab down
 ```
 
-`run` lance la commande avec **vos** privilèges ; Ctrl-C l'arrête. La reconnaissance (depuis
-la machine) et le chemin offensif (depuis `pc-offense`, à travers le filtre) atteignent tous
-deux `192.0.2.2` ; les services locaux de la machine restent hors d'atteinte du chemin
-offensif. Le lab ne sépare que le réseau du service, pas ses fichiers.
+`run` starts the command with **your** privileges; Ctrl-C stops it. Recon (from the
+machine) and the offensive path (from `pc-offense`, through the filter) both reach
+`192.0.2.2`; the machine's local services stay out of reach of the offensive path. The lab
+only separates the service's network, not its files.
 
-##### Lab garni (prêt à l'emploi)
+##### Stocked lab (ready to use)
 
-`lab/demarrer.sh` monte la cible et y lance **deux services remplis de données fictives** :
-un intranet HTTP (port 80) et un serveur de fichiers SMB (port 445), le tout au premier plan
-(Ctrl-C arrête et démonte) :
+`lab/start.sh` brings up the target and runs **two services filled with fictional data**
+on it: an HTTP intranet (port 80) and an SMB file server (port 445), all in the foreground
+(Ctrl-C stops and tears everything down):
 
 ```bash
-sudo bash lab/demarrer.sh
-# puis, dans un autre terminal : 192.0.2.2 dans scope.txt, puis sudo python -m offense.netns up
+sudo bash lab/start.sh
+# then, in another terminal: 192.0.2.2 in scope.txt, then sudo python -m offense.netns up
 ```
 
-L'intranet laisse traîner le mot de passe d'un compte de service qui ouvre un partage SMB
-protégé (`archives`, refusé en anonyme). Pour que le chaînage « mot de passe trouvé → accès
-au partage » s'exécute de façon déterministe, copiez le gabarit `operator` fourni (l'arsenal
-`operator` reste local, non versionné) :
+The intranet leaves lying around the password of a service account that opens a protected
+SMB share (`archives`, denied anonymously). For the "password found → share access" chain to
+run deterministically, copy the provided `operator` template (the `operator` arsenal stays
+local, not versioned):
 
 ```bash
 cp lab/operator-smb.yaml catalog/operator/smb.yaml
 ```
 
-Une mission `scanne et énumère 192.0.2.2` enchaîne alors : recon → lecture de l'intranet →
-récupération du mot de passe → listing authentifié du partage `archives`.
+A `scan and enumerate 192.0.2.2` mission then chains: recon → reading the intranet →
+retrieving the password → authenticated listing of the `archives` share.
 
-Limites connues :
+Known limitations:
 
-- rebond par un hôte in-scope (`curl -x` vers un proxy du périmètre) ;
-- lectures locales (`curl file://…`) — ce n'est pas du réseau ;
-- connexions entrantes vers le namespace (reverse shell : demanderait un DNAT) ;
-- périmètre IPv6 non appliqué (IPv4 seulement) ;
-- scans à sockets brutes en non-root (`nmap -sS`) : poser `setcap cap_net_raw+ep` sur nmap ;
-- le namespace confine le **réseau** des processus qu'il lance, pas leurs autres moyens de
-  parler à un processus extérieur : sockets Unix par chemin (`docker.sock`, ControlMaster
-  ssh, serveur tmux, `systemd-run --user`). La commande tourne avec le même utilisateur
-  que PirateCrew ;
-- sous WSL2, l'interop Windows (`curl.exe`, `powershell.exe`… qui s'exécuteraient côté
-  Windows, hors filtre) est **masquée** dans le namespace — vérifié par les tests
-  d'intégration ; elle reste active partout ailleurs ;
-- `sudo` journalise chaque commande rendue, identifiants compris, dans le journal système ;
-- une commande **déjà en cours** n'est plus filtrée si la table nftables est supprimée à la
-  main (`down` coupe d'abord le lien ; les commandes suivantes sont refusées, y compris si
-  les règles sont seulement vidées ou si le namespace a disparu) ;
-- un autre pare-feu en `DROP` sur le transit (Docker, iptables `FORWARD`) peut bloquer des
-  cibles in-scope : le symptôme est un timeout, pas une fuite.
+- pivoting through an in-scope host (`curl -x` to a proxy inside the scope);
+- local reads (`curl file://...`) - that is not networking;
+- inbound connections to the namespace (reverse shell: would need a DNAT);
+- IPv6 scope not enforced (IPv4 only);
+- raw-socket scans as non-root (`nmap -sS`): set `setcap cap_net_raw+ep` on nmap;
+- the namespace confines the **network** of the processes it starts, not their other ways
+  of talking to an outside process: path-based Unix sockets (`docker.sock`, ssh
+  ControlMaster, tmux server, `systemd-run --user`). The command runs as the same user as
+  PirateCrew;
+- under WSL2, Windows interop (`curl.exe`, `powershell.exe`... which would run on the
+  Windows side, outside the filter) is **masked** in the namespace - verified by the
+  integration tests; it stays active everywhere else;
+- `sudo` logs every rendered command, credentials included, in the system journal;
+- a command **already running** is no longer filtered if the nftables table is deleted by
+  hand (`down` cuts the link first; subsequent commands are refused, including if the rules
+  are merely flushed or if the namespace has disappeared);
+- another firewall with `DROP` on transit (Docker, iptables `FORWARD`) can block in-scope
+  targets: the symptom is a timeout, not a leak.
 
-## Prérequis
+## Prerequisites
 
-- **Python 3.11+** (testé en 3.13)
-- Une **clé API Anthropic**
-- *(recommandé)* un environnement Linux disposant des outils de pentest — voir
-  [Environnement recommandé (Kali)](#environnement-recommandé-kali)
+- **Python 3.11+** (tested on 3.13)
+- An **Anthropic API key**
+- *(recommended)* a Linux environment with the pentest tools - see
+  [Recommended environment (Kali)](#recommended-environment-kali)
 
 ## Installation
 
 ```bash
 python -m venv venv
-# Windows :        venv\Scripts\activate
-# Linux / Kali :   source venv/bin/activate
+# Windows:         venv\Scripts\activate
+# Linux / Kali:    source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Créer un fichier `.env` à la racine avec votre clé API :
+Create a `.env` file at the root with your API key:
 
 ```
 ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-Définir le **périmètre autorisé** à partir de l'exemple fourni :
+Define the **authorized scope** from the provided example:
 
 ```bash
-cp scope.txt.example scope.txt      # Windows : copy scope.txt.example scope.txt
+cp scope.txt.example scope.txt      # Windows: copy scope.txt.example scope.txt
 ```
 
-`scope.txt` contient une **IP ou un CIDR par ligne**, p.ex. :
+`scope.txt` contains **one IP or CIDR per line**, e.g.:
 
 ```
 10.10.10.0/24
 127.0.0.1/32
 ```
 
-## Lancement
+## Running
 
 ```bash
 python orchestrator.py
 ```
 
-Puis, en langage naturel :
+Then, in natural language:
 
 ```
-Vous > scanne et énumère 10.10.10.5
+You > scan and enumerate 10.10.10.5
 ```
 
-Le superviseur reconnaît une mission autonome, charge le périmètre, puis déroule la
-boucle. La réponse finale résume les trouvailles (hôtes, services, identifiants…) et
-**signale tout outil manquant** à installer.
+The supervisor recognizes an autonomous mission, loads the scope, then runs the
+loop. The final answer summarizes the findings (hosts, services, credentials...) and
+**flags any missing tool** to install.
 
-Commandes de l'invite (en plus du langage naturel) :
+Prompt commands (in addition to natural language):
 
-| Commande | Effet |
+| Command | Effect |
 |---|---|
-| `verbose [on\|off]` | diagnostics détaillés (aussi : `PIRATECREW_VERBOSE=1`) |
-| `propose-only [on\|off]` | les techniques rédigées par l'auteur LLM sont montrées, pas exécutées |
-| `sessions` | sessions obtenues pendant la dernière mission, autorisées ou en attente |
-| `authorize <hôte>` | autorise les sessions en attente de cet hôte et reprend la mission |
-| `promote` | ajoute au RAG partagé les techniques LLM proposées en fin de mission |
-| `exit` / `quit` | quitter |
+| `verbose [on\|off]` | detailed diagnostics (also: `PIRATECREW_VERBOSE=1`) |
+| `propose-only [on\|off]` | techniques written by the LLM author are shown, not executed |
+| `sessions` | sessions obtained during the last mission, authorized or pending |
+| `authorize <host>` | authorizes this host's pending sessions and resumes the mission |
+| `promote` | adds the LLM techniques proposed at the end of the mission to the shared RAG |
+| `exit` / `quit` | quit |
 
-Rien n'est écrit d'office dans le RAG partagé : en fin de mission, les techniques rédigées
-par l'auteur LLM sont **affichées** telles qu'elles seraient stockées, et seule la commande
-`promote` les y ajoute. Le filtre automatique (secrets, identifiants et noms d'hôte connus,
-IP, jetons à forte entropie) n'est qu'un pré-tri : relisez avant de promouvoir.
+Nothing is written to the shared RAG by default: at the end of a mission, the techniques
+written by the LLM author are **displayed** as they would be stored, and only the
+`promote` command adds them. The automatic filter (secrets, known credentials and host
+names, IPs, high-entropy tokens) is only a pre-screen: review before promoting.
 
-Les résultats détaillés sont dans `missions/<id>/rapport.md` (rapport lisible) et
-`missions/<id>/world.json` (état complet, réécrit à chaque cycle).
+Detailed results are in `missions/<id>/report.md` (readable report) and
+`missions/<id>/world.json` (full state, rewritten at every cycle).
 
-> ⚠️ **Secrets au repos.** PirateCrew récolte et réutilise des identifiants : par
-> conception, `rapport.md` et `world.json` contiennent les secrets trouvés **en clair**
-> (credentials, commandes rendues, sorties d'outils). C'est inhérent à un orchestrateur
-> de pentest, pas une fuite. Le dossier `missions/` est gitignoré (jamais versionné) ;
-> sur une machine partagée, restreignez-le (`chmod 700 missions/`). Si vous ne voulez
-> aucun secret au repos, n'exécutez pas de technique utilisant un credential, ou purgez
-> `missions/` après exploitation. `audit.log`, lui, n'en contient jamais (voir
-> [Sécurité](#sécurité-fail-closed)).
+> ⚠️ **Secrets at rest.** PirateCrew harvests and reuses credentials: by design,
+> `report.md` and `world.json` contain the secrets found **in clear text**
+> (credentials, rendered commands, tool output). This is inherent to a pentest
+> orchestrator, not a leak. The `missions/` folder is gitignored (never versioned);
+> on a shared machine, restrict it (`chmod 700 missions/`). If you want no secret at
+> rest, do not run techniques that use a credential, or purge
+> `missions/` after exploitation. `audit.log`, for its part, never contains any (see
+> [Security](#security-fail-closed)).
 
-## Comment ça marche
+## How it works
 
 ```
-requête ──► superviseur maître
-               ├─ mission autonome ──► enter (scope fail-closed)
+request ──► master supervisor
+               ├─ autonomous mission ──► enter (fail-closed scope)
                │                         └─► recon ─► decide ─► execute ─► integrate ─┐
                │                                        ▲                             │
                │                                        └──────── continue ◄──────────┘
-               │                                                 (sinon : fin)
-               ├─ base de connaissances (RAG)
-               ├─ analyse de code
-               └─ réponse directe
+               │                                                 (otherwise: end)
+               ├─ knowledge base (RAG)
+               ├─ code analysis
+               └─ direct answer
 ```
 
-- **recon** : scan des ports courants / nmap si disponible ; les services ouverts sont
-  remontés dans le `WorldModel`.
-- **decide** : pour chaque (hôte in-scope, service), planifie les techniques du catalogue
-  dont les prérequis sont satisfaits et qui n'ont pas déjà été tentées (ledger).
-- **execute** : un agent par tâche exécute la technique via ses outils ; les trouvailles
-  sont remontées de façon structurée (`report_finding`).
-- **integrate** : met à jour le ledger, récupère les trouvailles du texte brut, et décide
-  de continuer ou de terminer.
+- **recon**: scan of common ports / nmap if available; open services are
+  fed back into the `WorldModel`.
+- **decide**: for each (in-scope host, service), plans the catalog techniques
+  whose prerequisites are met and that have not already been attempted (ledger).
+- **execute**: one agent per task runs the technique through its tools; findings
+  are reported in a structured way (`report_finding`).
+- **integrate**: updates the ledger, extracts findings from the raw text, and decides
+  whether to continue or finish.
 
-## Outils & catalogue
+## Tools & catalog
 
-Les agents n'appellent que des **outils déclarés** (`@tool`), tous soumis au contrôle de
-périmètre. Outils par domaine :
+Agents only call **declared tools** (`@tool`), all subject to the scope check. Tools by
+domain:
 
-| Domaine        | Outils                              |
+| Domain         | Tools                               |
 |----------------|-------------------------------------|
 | `network`      | `nmap_scan`, `tcp_port_check`       |
 | `web`          | `http_fingerprint`, `http_get`      |
 | `ad`           | `smb_port_probe`, `smb_list_shares` |
-| *obligatoires* | `log_audit_event`, `scope_check`    |
-| *+*            | `report_finding` (lié au `WorldModel`) |
+| *mandatory*    | `log_audit_event`, `scope_check`    |
+| *+*            | `report_finding` (bound to the `WorldModel`) |
 
-Le **catalogue** décrit les techniques de façon déclarative : `catalog/builtin/` (fourni)
-et `catalog/operator/` (local, non versionné — gabarits à remplir, cf.
+The **catalog** describes techniques declaratively: `catalog/builtin/` (provided)
+and `catalog/operator/` (local, not versioned - templates to fill in, see
 `catalog/operator.example.yaml`).
 
-### Ajouter un outil
+### Adding a tool
 
-1. **Écrire** la fonction `@tool` dans `tools/registry.py` : valider la cible via
-   `_validate_target(...)`, journaliser via `_audit(...)`, et **ne jamais lever**
-   (renvoyer un message en cas d'échec).
-2. **Déclarer** l'outil dans `TOOL_CATALOG[domaine]` (ou `MANDATORY_TOOLS`).
-3. **Décrire** une technique au catalogue (`catalog/builtin/*.yaml`) : `service`, `tool`,
+1. **Write** the `@tool` function in `tools/registry.py`: validate the target via
+   `_validate_target(...)`, log via `_audit(...)`, and **never raise**
+   (return a message on failure).
+2. **Declare** the tool in `TOOL_CATALOG[domain]` (or `MANDATORY_TOOLS`).
+3. **Describe** a technique in the catalog (`catalog/builtin/*.yaml`): `service`, `tool`,
    `command_template` (placeholders `{target}` / `{port}`), `success_signal`.
 
-> *« Avoir l'outil » (étape 2) et « être chargé de l'utiliser » (étape 3) sont distincts.*
+> *"Having the tool" (step 2) and "being tasked with using it" (step 3) are distinct.*
 
-### Outil manquant (escalade)
+### Missing tool (escalation)
 
-Si une technique requiert un **binaire externe absent** (vérifié par `shutil.which`), la
-mission ne l'exécute pas : elle la **signale** (« installe `smbclient` »), ne la « grille »
-pas dans le ledger, et la **reprend** automatiquement après installation + relance de la
-mission. L'humain reste maître des capacités installées.
+If a technique requires an **external binary that is absent** (checked with `shutil.which`),
+the mission does not run it: it **flags** it ("install `smbclient`"), does not "burn" it
+in the ledger, and **resumes** it automatically after installation + relaunch of the
+mission. The human stays in control of the installed capabilities.
 
-## Environnement recommandé (Kali)
+## Recommended environment (Kali)
 
-Sous Windows, le plus simple pour disposer d'un vrai arsenal (`nmap`, `smbclient`,
-`gobuster`…) est de faire tourner PirateCrew dans **WSL2 Kali**. Les agents détectent et
-utilisent alors les binaires présents ; ceux qui manquent sont signalés (voir ci-dessus).
+On Windows, the easiest way to get a real arsenal (`nmap`, `smbclient`,
+`gobuster`...) is to run PirateCrew in **WSL2 Kali**. The agents then detect and
+use the binaries that are present; missing ones are flagged (see above).
 
-C'est aussi là que fonctionne le [périmètre réseau](#périmètre-réseau-chemin-offensif)
-(namespaces + nftables, vérifié sur le noyau WSL2) : sans lui, les techniques
-`operator`/`llm` ne s'exécutent pas.
+This is also where the [network scope](#network-scope-offensive-path)
+(namespaces + nftables, verified on the WSL2 kernel) works: without it, the
+`operator`/`llm` techniques do not run.
 
 ## Tests
 
@@ -306,46 +306,50 @@ C'est aussi là que fonctionne le [périmètre réseau](#périmètre-réseau-che
 pytest -q
 ```
 
-Preuve d'intégration du périmètre réseau (Linux, root — crée deux namespaces locaux, rien
-ne sort de la machine) :
+Integration proof of the network scope (Linux, root - creates two local namespaces,
+nothing leaves the machine):
 
 ```bash
 sudo PIRATECREW_NETNS_IT=1 venv/bin/pytest tests/test_netns_integration.py tests/test_netns_round3_replay.py -v
 ```
 
-`test_netns_round3_replay.py` rejoue, avec les vrais outils (`curl`, `sqlmap`, `ffuf`, `wfuzz`,
-`scp`, `rsync`, `nmap`, `smbclient`, `ssh`), les contournements du contrôle texte confirmés par
-la revue adverse du 18/11/2026 : aucun paquet n'atteint la cible hors périmètre, et le filtre
-compte bien les paquets que chaque outil a tenté d'émettre.
+`test_netns_round3_replay.py` replays, with the real tools (`curl`, `sqlmap`, `ffuf`, `wfuzz`,
+`scp`, `rsync`, `nmap`, `smbclient`, `ssh`), the text-check bypasses confirmed by
+the adversarial review of 2026-11-18: no packet reaches the out-of-scope target, and the
+filter does count the packets each tool tried to send.
 
-> Sous Windows, le **premier** lancement peut prendre quelques minutes : l'antivirus
-> scanne les imports `langchain` au chargement. Les tests n'effectuent **aucun** appel
-> LLM ni réseau réel.
+> On Windows, the **first** run can take a few minutes: the antivirus
+> scans the `langchain` imports at load time. The tests make **no** real LLM
+> or network call.
 
-## Structure du projet
+## Project structure
 
 ```
-orchestrator.py        # boucle maître + mission autonome + CLI
-scope.py               # périmètre fail-closed + journal d'audit
-state/world_model.py   # modèle du terrain partagé (hôtes, services, creds, ledger…)
+orchestrator.py        # master loop + autonomous mission + CLI
+scope.py               # fail-closed scope + audit log
+state/world_model.py   # shared world model (hosts, services, creds, ledger...)
 agents/
-  dynamic_agent.py     # fabrique d'agents d'intervention (factory)
-  pirate_agent.py      # agent RAG (base de connaissances)
-  analyst_agent.py     # agent d'analyse de code
-tools/registry.py      # outils @tool (network / web / ad) + chokepoint de périmètre
+  dynamic_agent.py     # intervention agent factory
+  pirate_agent.py      # RAG agent (knowledge base)
+  analyst_agent.py     # code analysis agent
+tools/registry.py      # @tool tools (network / web / ad) + scope chokepoint
 offense/
-  guardrails.py        # garde-fous texte (shell, destructif, périmètre best-effort)
-  executor.py          # exécuteur déterministe des gabarits operator/llm
-  netns.py             # périmètre appliqué par le noyau (namespace + nftables)
+  guardrails.py        # text guardrails (shell, destructive, best-effort scope)
+  executor.py          # deterministic executor for operator/llm templates
+  netns.py             # kernel-enforced scope (namespace + nftables)
 catalog/
-  builtin/             # techniques fournies (recon / web / smb)
-  operator/            # techniques locales de l'opérateur (non versionné)
-tests/                 # suite pytest
-scripts/               # utilitaires ponctuels (inspection de la base RAG)
+  builtin/             # provided techniques (recon / web / smb)
+  operator/            # operator's local techniques (not versioned)
+tests/                 # pytest suite
+scripts/               # one-off utilities (RAG database inspection)
 ```
 
-## État du projet
+## Project status
 
-Prototype **fonctionnel et couvert par les tests** (274 tests verts), pas encore durci
-pour une mise en production. Dépend d'une clé API LLM et, pour le scan complet, d'outils
-système optionnels (repli en Python pur sinon).
+**Functional prototype covered by tests** (282 passing tests), not yet hardened
+for production. Depends on an LLM API key and, for the full scan, on optional system
+tools (pure-Python fallback otherwise).
+
+## License
+
+MIT - see [LICENSE](LICENSE).

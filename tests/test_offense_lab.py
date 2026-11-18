@@ -1,7 +1,7 @@
-"""Cible de lab locale (offense.lab) — tests unitaires.
+"""Local lab target (offense.lab) - unit tests.
 
-Aucun de ces tests ne lance `ip` : fonctions pures, ou `run` injecté. La preuve
-par le noyau est dans test_lab_integration.py.
+None of these tests runs `ip`: pure functions, or an injected `run`. The
+kernel-level proof is in test_lab_integration.py.
 """
 import ipaddress
 
@@ -16,11 +16,11 @@ class _Proc:
 
 
 class _FakeRun:
-    """Remplace subprocess.run : enregistre les argv, ne lance rien."""
+    """Stands in for subprocess.run: records the argv, runs nothing."""
 
     def __init__(self, fail_on=None):
         self.calls = []
-        self.fail_on = fail_on          # préfixe d'argv qui échoue (returncode=1)
+        self.fail_on = fail_on          # argv prefix that fails (returncode=1)
 
     def __call__(self, argv, **kwargs):
         self.calls.append(list(argv))
@@ -30,13 +30,13 @@ class _FakeRun:
 
 
 def test_lab_address_is_never_routed_and_clear_of_the_offense_link():
-    # Plage de documentation (RFC 5737) : si un paquet s'égarait, il n'irait nulle part.
+    # Documentation range (RFC 5737): a stray packet would go nowhere.
     net = ipaddress.ip_network(lab.LAB_NET)
     assert net.subnet_of(ipaddress.ip_network("192.0.2.0/24"))
     assert not net.overlaps(ipaddress.ip_network(netns.LINK_NET))
     assert ipaddress.ip_address(lab.LAB_ADDR) in net and ipaddress.ip_address(lab.LAB_HOST_ADDR) in net
     assert lab.LAB_ADDR != lab.LAB_HOST_ADDR
-    # La cible de lab est un périmètre acceptable pour le namespace offensif.
+    # The lab target is an acceptable scope for the offensive namespace.
     assert "@scope4 accept" in netns.nft_ruleset([ipaddress.ip_network(f"{lab.LAB_ADDR}/32")])
 
 
@@ -47,7 +47,7 @@ def test_setup_gives_the_lab_its_own_address():
     assert ["ip", "addr", "add", "192.0.2.1/30", "dev", "pc-lab-host"] in cmds
     assert [*in_lab, "ip", "addr", "add", "192.0.2.2/30", "dev", "pc-lab-ns"] in cmds
     assert [*in_lab, "ip", "link", "set", "lo", "up"] in cmds
-    # Pas de route par défaut : la cible répond sur son lien, elle ne sort pas ailleurs.
+    # No default route: the target answers on its link and goes nowhere else.
     assert not any("default" in c for c in cmds)
 
 
@@ -60,7 +60,7 @@ def test_up_starts_clean_and_runs_every_step():
     run = _FakeRun()
     lab.up(run=run)
     n = len(lab.teardown_commands())
-    assert run.calls[:n] == lab.teardown_commands()          # idempotent : démonte d'abord
+    assert run.calls[:n] == lab.teardown_commands()          # idempotent: tears down first
     assert run.calls[n:] == lab.setup_commands()
 
 
@@ -84,9 +84,9 @@ def test_main_requires_linux_root_and_a_command(monkeypatch, capsys):
     monkeypatch.setattr(lab.os, "geteuid", lambda: 1000, raising=False)
     assert lab.main(["up"]) == 2
     monkeypatch.setattr(lab.os, "geteuid", lambda: 0, raising=False)
-    assert lab.main(["run"]) == 2                              # rien à lancer
+    assert lab.main(["run"]) == 2                              # nothing to run
     monkeypatch.setattr(lab, "is_up", lambda: False)
-    assert lab.main(["run", "--", "true"]) == 1                # lab absent : on le dit
+    assert lab.main(["run", "--", "true"]) == 1                # lab missing: it says so
     assert "offense.lab up" in capsys.readouterr().err
 
 

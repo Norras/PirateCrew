@@ -29,11 +29,11 @@ scope.txt
 audit.log
 *.log
 
-# === Missions autonomes (état + artefacts par mission, contient des secrets) ===
+# === Autonomous missions (state + per-mission artifacts, contains secrets) ===
 missions/
 
-# === Artefacts déposés dans le cwd par un outil (-o), p.ex. une technique gobuster ===
-# (nom + contenu portent la cible : ne jamais versionner)
+# === Artifacts dropped in the cwd by a tool (-o), e.g. a gobuster technique ===
+# (name + content carry the target: never version them)
 gobuster_*.txt
 ffuf_*.json
 

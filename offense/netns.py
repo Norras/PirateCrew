@@ -1,17 +1,16 @@
-"""Périmètre appliqué au niveau réseau (network namespace + nftables).
+"""Scope enforced at the network level (network namespace + nftables).
 
-Les commandes du chemin offensif déterministe s'exécutent dans un namespace
-réseau dédié dont la seule sortie est une paire veth. Côté hôte, une table
-nftables ne laisse transiter que les paquets dont l'IP de DESTINATION est dans
-le set alimenté par le périmètre. C'est le noyau qui tranche : la façon dont
-l'hôte est écrit dans la commande (décimale, hexadécimale, point final, URL
-tordue…) n'a plus aucune importance.
+Commands on the deterministic offensive path run in a dedicated network
+namespace whose only exit is a veth pair. On the host side, an nftables table
+lets through only packets whose DESTINATION IP is in the set fed from the
+scope. The kernel decides: how the host is written in the command (decimal,
+hexadecimal, trailing dot, twisted URL...) no longer matters.
 
-Le filtre est dans le hook `forward` de l'hôte, pas dans le namespace : un
-outil qui émet en AF_PACKET contourne un hook `output`, pas un veth.
+The filter sits in the host's `forward` hook, not in the namespace: a tool
+that emits over AF_PACKET bypasses an `output` hook, but not a veth.
 
-Mise en place (root) : `sudo python -m offense.netns up`. À relancer après
-toute modification de scope.txt.
+Setup (root): `sudo python -m offense.netns up`. Re-run after any change
+to scope.txt.
 """
 import argparse
 import ipaddress
@@ -26,9 +25,9 @@ from scope import Scope, ScopeError, get_active_scope, load_scope
 NS_NAME = "pc-offense"
 HOST_IF = "pc-host"
 NS_IF = "pc-ns"
-# Lien interne hôte <-> namespace (les deux bouts de la paire veth). Pris dans la
-# plage partagée des opérateurs (100.64.0.0/10, RFC 6598) et non dans une plage
-# privée : un périmètre couvrant 10/8, 172.16/12 ou 192.168/16 ne le chevauche pas.
+# Internal host <-> namespace link (the two ends of the veth pair). Taken from the
+# carrier-grade shared range (100.64.0.0/10, RFC 6598) rather than a private
+# range: a scope covering 10/8, 172.16/12 or 192.168/16 does not overlap it.
 LINK_NET = "100.127.77.0/30"
 HOST_ADDR = "100.127.77.1"
 NS_ADDR = "100.127.77.2"
@@ -37,34 +36,34 @@ NFT_SET = "scope4"
 HELPER_PATH = "/usr/local/sbin/pc-netns-exec"
 SUDOERS_PATH = "/etc/sudoers.d/piratecrew"
 
-# Lanceur de processus par défaut. Point d'injection unique : les fonctions
-# prennent `run=None` et retombent dessus, ce qui permet à la suite de tests de
-# le neutraliser d'un coup (conftest) — aucun test unitaire ne lance sudo/ip/nft.
+# Default process launcher. Single injection point: the functions take
+# `run=None` and fall back to it, which lets the test suite neutralize it in one
+# go (conftest) — no unit test runs sudo/ip/nft.
 _spawn = subprocess.run
 
 _LINK_PREFIXLEN = LINK_NET.split("/")[1]
 _RESOLV_PATH = f"/etc/netns/{NS_NAME}/resolv.conf"
 _SUDO_USER_RE = re.compile(r"^[a-z_][a-z0-9_-]*$")
 
-# Script d'aide installé en root par `up`. C'est la SEULE commande que la règle
-# sudoers autorise : il entre dans le namespace puis redescend à l'utilisateur
-# appelant (setpriv) avant d'exécuter — aucune exécution root n'est accordée.
+# Helper script installed as root by `up`. It is the ONLY command the sudoers
+# rule allows: it enters the namespace, then drops back to the calling user
+# (setpriv) before executing — no root execution is granted.
 #
-# - PATH est fixé d'entrée : le script tourne en root, il ne doit pas résoudre
-#   nft/ip/setpriv dans le PATH de l'appelant (sudoers sans secure_path).
-# - La garde vaut pour les DEUX modes (--check et exécution) : namespace présent
-#   (code 96) et règles de blocage présentes dans les chaînes forward et input
-#   (code 97). Vérifier le seul contenu du set ne suffit pas : un
-#   `nft flush table` garde le set mais vide les chaînes (policy accept).
-# - Après la descente de privilèges, HOME/USER/LOGNAME sont ceux de l'appelant
-#   (sudo les a remis à zéro) ; le PATH de l'outil est passé par `run_isolated`.
-# - WSL2 : un binaire Windows (curl.exe…) lancé depuis Linux s'exécute côté
-#   Windows, hors de tout namespace réseau. L'interop passe par des sockets
-#   sous /run/WSL : elles sont masquées par un tmpfs vide, dans le namespace de
-#   montage privé que crée `ip netns exec` (rien ne change pour le reste du
-#   système), avant la descente de privilèges. Masquage impossible : code 98.
+# - PATH is fixed up front: the script runs as root, so it must not resolve
+#   nft/ip/setpriv in the caller's PATH (sudoers without secure_path).
+# - The guard applies to BOTH modes (--check and execution): namespace present
+#   (code 96) and blocking rules present in the forward and input chains
+#   (code 97). Checking only the set's contents is not enough: an
+#   `nft flush table` keeps the set but empties the chains (policy accept).
+# - After dropping privileges, HOME/USER/LOGNAME are the caller's
+#   (sudo reset them); the tool's PATH is passed by `run_isolated`.
+# - WSL2: a Windows binary (curl.exe...) launched from Linux runs on the
+#   Windows side, outside any network namespace. Interop goes through sockets
+#   under /run/WSL: they are masked by an empty tmpfs, inside the private
+#   mount namespace that `ip netns exec` creates (nothing changes for the rest
+#   of the system), before dropping privileges. Masking impossible: code 98.
 HELPER_SCRIPT = """#!/bin/sh
-# Installé par `python -m offense.netns up`. Ne pas modifier à la main.
+# Installed by `python -m offense.netns up`. Do not edit by hand.
 set -eu
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
@@ -72,9 +71,9 @@ refuse() {
     echo "pc-netns-exec: $1" >&2
     exit "$2"
 }
-[ -e /run/netns/pc-offense ] || refuse "namespace pc-offense absent" 96
-nft list chain inet piratecrew forward 2>/dev/null | grep -Eq 'iifname "pc-host" counter .*drop' || refuse "filtre nft piratecrew absent ou incomplet" 97
-nft list chain inet piratecrew input 2>/dev/null | grep -Eq 'iifname "pc-host" drop' || refuse "filtre nft piratecrew absent ou incomplet" 97
+[ -e /run/netns/pc-offense ] || refuse "namespace pc-offense missing" 96
+nft list chain inet piratecrew forward 2>/dev/null | grep -Eq 'iifname "pc-host" counter .*drop' || refuse "nft filter piratecrew missing or incomplete" 97
+nft list chain inet piratecrew input 2>/dev/null | grep -Eq 'iifname "pc-host" drop' || refuse "nft filter piratecrew missing or incomplete" 97
 if [ "${1:-}" = "--check" ]; then
     exec nft -j list set inet piratecrew scope4
 fi
@@ -90,7 +89,7 @@ gid="$2"
 shift 2
 if [ -d /run/WSL ]; then
     mount -t tmpfs -o ro,nosuid,nodev,noexec tmpfs /run/WSL || {
-        echo "pc-netns-exec: interop WSL non masquable" >&2
+        echo "pc-netns-exec: WSL interop cannot be masked" >&2
         exit 98
     }
 fi
@@ -100,12 +99,12 @@ exec setpriv --reuid "$uid" --regid "$gid" --init-groups -- "$@"
 
 
 class NetnsError(Exception):
-    """Namespace absent, non conforme au périmètre actif, ou mise en place impossible."""
+    """Namespace missing, not matching the active scope, or setup impossible."""
 
 
 def scope_v4(scope: Scope) -> list[ipaddress.IPv4Network]:
-    """Entrées IPv4 du périmètre, fusionnées et triées (IPv6 ignoré : non
-    appliqué au niveau réseau en v1, le namespace n'a pas d'IPv6)."""
+    """IPv4 scope entries, merged and sorted (IPv6 ignored: not enforced at
+    the network level in v1, the namespace has no IPv6)."""
     v4 = [n for n in scope.networks if n.version == 4]
     return sorted(ipaddress.collapse_addresses(v4))
 
@@ -114,21 +113,21 @@ _LOOPBACK = ipaddress.ip_network("127.0.0.0/8")
 
 
 def loopback_entries(scope: Scope) -> list[str]:
-    """Entrées IPv4 du périmètre situées dans 127.0.0.0/8. Depuis le namespace,
-    ces adresses désignent SA boucle locale (vide), pas celle de la machine : le
-    chemin offensif ne peut pas y joindre les services locaux de l'hôte."""
+    """IPv4 scope entries located in 127.0.0.0/8. From inside the namespace,
+    these addresses refer to ITS OWN loopback (empty), not the machine's: the
+    offensive path cannot reach the host's local services there."""
     return [str(n) for n in scope_v4(scope) if n.overlaps(_LOOPBACK)]
 
 
 def loopback_warning(scope: Scope) -> str | None:
-    """Avertissement à afficher si le périmètre contient la boucle locale, sinon None."""
+    """Warning to display if the scope contains the loopback, otherwise None."""
     entries = loopback_entries(scope)
     if not entries:
         return None
-    return (f"[NETNS] Attention : {', '.join(entries)} désigne la boucle locale. Dans le "
-            "namespace, c'est celle du namespace (vide) et non celle de cette machine : "
-            "le chemin offensif ne peut pas joindre ses services locaux. Pour un lab local, "
-            "donnez à la cible sa propre adresse : « sudo python -m offense.lab up ».")
+    return (f"[NETNS] Warning: {', '.join(entries)} is the loopback. Inside the namespace, "
+            "that is the namespace's own (empty) loopback, not this machine's: the "
+            "offensive path cannot reach its local services. For a local lab, give the "
+            "target its own address: `sudo python -m offense.lab up`.")
 
 
 def _element(net: ipaddress.IPv4Network) -> str:
@@ -136,19 +135,19 @@ def _element(net: ipaddress.IPv4Network) -> str:
 
 
 def nft_ruleset(networks: list[ipaddress.IPv4Network]) -> str:
-    """Script nftables complet, chargé en une transaction par `nft -f -`.
+    """Complete nftables script, loaded in a single transaction by `nft -f -`.
 
-    Le préambule `table … {}` / `delete table …` rend le chargement idempotent
-    et atomique : l'ancien jeu de règles est remplacé d'un coup, sans fenêtre
-    où le namespace transiterait sans filtre.
+    The `table ... {}` / `delete table ...` preamble makes loading idempotent
+    and atomic: the old ruleset is replaced in one go, with no window where
+    the namespace would transit unfiltered.
     """
     if not networks:
-        raise NetnsError("Périmètre sans entrée IPv4 : rien à autoriser au niveau réseau.")
+        raise NetnsError("Scope has no IPv4 entry: nothing to allow at the network level.")
     link = ipaddress.ip_network(LINK_NET)
     for net in networks:
         if net.overlaps(link):
             raise NetnsError(
-                f"L'entrée de périmètre {net} chevauche le lien interne du namespace ({LINK_NET})."
+                f"Scope entry {net} overlaps the namespace's internal link ({LINK_NET})."
             )
     elements = ", ".join(_element(n) for n in networks)
     return f"""table inet {NFT_TABLE} {{}}
@@ -181,7 +180,7 @@ table inet {NFT_TABLE} {{
 
 
 def setup_commands() -> list[list[str]]:
-    """Commandes (root) créant le namespace et son lien veth, dans l'ordre."""
+    """Commands (root) creating the namespace and its veth link, in order."""
     in_ns = ["ip", "netns", "exec", NS_NAME]
     return [
         ["ip", "netns", "add", NS_NAME],
@@ -199,13 +198,13 @@ def setup_commands() -> list[list[str]]:
 
 
 def teardown_commands() -> list[list[str]]:
-    """Commandes (root) de démontage, dans l'ordre.
+    """Teardown commands (root), in order.
 
-    Le veth hôte part EN PREMIER. `ip netns del` ne fait que retirer le nom : si
-    une commande tourne encore dans le namespace, celui-ci survit avec son lien.
-    Supprimer une extrémité détruit la paire même dans ce cas — la commande en
-    cours perd le réseau AVANT que la table nftables ne soit retirée, et un `up`
-    suivant ne bute pas sur un `pc-host` résiduel.
+    The host veth goes FIRST. `ip netns del` only removes the name: if a
+    command is still running in the namespace, the namespace survives with its
+    link. Deleting one end destroys the pair even in that case — the running
+    command loses the network BEFORE the nftables table is removed, and a
+    following `up` does not trip over a leftover `pc-host`.
     """
     return [
         ["ip", "link", "del", HOST_IF],
@@ -215,11 +214,11 @@ def teardown_commands() -> list[list[str]]:
 
 
 # --------------------------------------------------------------------------- #
-# Mise en place / démontage (root)
+# Setup / teardown (root)
 # --------------------------------------------------------------------------- #
 def _write_root_file(path: str, content: str, mode: int) -> None:
-    """Écrit `content` dans `path` (répertoire parent créé), de façon atomique,
-    avec les droits `mode`. Fins de ligne LF quel que soit l'OS."""
+    """Write `content` to `path` (parent directory created), atomically,
+    with permissions `mode`. LF line endings regardless of the OS."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = f"{path}.tmp"
     with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
@@ -229,26 +228,26 @@ def _write_root_file(path: str, content: str, mode: int) -> None:
 
 
 def _try(run, argv: list[str]) -> None:
-    """Lance une commande dont l'échec est sans importance (démontage)."""
+    """Run a command whose failure does not matter (teardown)."""
     try:
         run(argv, capture_output=True, text=True)
-    except Exception:  # binaire absent, etc. : un démontage ne lève jamais
+    except Exception:  # missing binary, etc.: a teardown never raises
         pass
 
 
 def _must(run, argv: list[str], stdin: str | None = None) -> None:
-    """Lance une commande qui DOIT réussir ; sinon NetnsError (commande + stderr)."""
+    """Run a command that MUST succeed; otherwise NetnsError (command + stderr)."""
     try:
         proc = run(argv, input=stdin, capture_output=True, text=True)
     except OSError as exc:
-        raise NetnsError(f"Commande impossible : {' '.join(argv)} ({exc})") from exc
+        raise NetnsError(f"Cannot run command: {' '.join(argv)} ({exc})") from exc
     if proc.returncode != 0:
         detail = (proc.stderr or "").strip()
-        raise NetnsError(f"Échec de : {' '.join(argv)}" + (f" — {detail}" if detail else ""))
+        raise NetnsError(f"Failed: {' '.join(argv)}" + (f" — {detail}" if detail else ""))
 
 
 def down(run=None) -> None:
-    """Démonte le namespace et la table nftables. Ne lève jamais."""
+    """Tear down the namespace and the nftables table. Never raises."""
     run = run or _spawn
     for argv in teardown_commands():
         _try(run, argv)
@@ -256,28 +255,28 @@ def down(run=None) -> None:
 
 def up(scope: Scope, dns: str | None = None, sudo_user: str | None = None,
        run=None, write=_write_root_file) -> None:
-    """Met en place le namespace filtré pour `scope` (root). Idempotent.
+    """Set up the filtered namespace for `scope` (root). Idempotent.
 
-    Tout est validé AVANT la première commande. Les règles nftables sont
-    chargées avant la création du namespace : il n'existe jamais sans filtre.
-    Un échec en cours de route démonte ce qui a été créé puis lève NetnsError.
+    Everything is validated BEFORE the first command. The nftables rules are
+    loaded before the namespace is created: it never exists without a filter.
+    A failure along the way tears down what was created, then raises NetnsError.
     """
     run = run or _spawn
     networks = scope_v4(scope)
-    ruleset = nft_ruleset(networks)                       # lève si vide / chevauchement
+    ruleset = nft_ruleset(networks)                       # raises if empty / overlapping
     resolv = ""
     if dns is not None:
         try:
             dns_ip = ipaddress.IPv4Address(dns)
         except ValueError as exc:
-            raise NetnsError(f"--dns attend une IPv4 littérale : {dns!r}") from exc
+            raise NetnsError(f"--dns expects a literal IPv4: {dns!r}") from exc
         if not any(dns_ip in net for net in networks):
-            raise NetnsError(f"Le résolveur {dns} est hors périmètre : refusé.")
+            raise NetnsError(f"Resolver {dns} is out of scope: refused.")
         resolv = f"nameserver {dns_ip}\n"
     if sudo_user is not None and not _SUDO_USER_RE.match(sudo_user):
-        raise NetnsError(f"Nom d'utilisateur sudo invalide : {sudo_user!r}")
+        raise NetnsError(f"Invalid sudo user name: {sudo_user!r}")
 
-    down(run)                                             # repart d'un état propre
+    down(run)                                             # start from a clean state
     try:
         _must(run, ["nft", "-f", "-"], stdin=ruleset)
         for argv in setup_commands():
@@ -288,13 +287,13 @@ def up(scope: Scope, dns: str | None = None, sudo_user: str | None = None,
             if sudo_user is not None:
                 write(SUDOERS_PATH, f"{sudo_user} ALL=(root) NOPASSWD: {HELPER_PATH}\n", 0o440)
         except OSError as exc:
-            raise NetnsError(f"Écriture impossible : {exc}") from exc
+            raise NetnsError(f"Cannot write file: {exc}") from exc
         if sudo_user is not None:
             try:
                 _must(run, ["visudo", "-cf", SUDOERS_PATH])
             except NetnsError:
                 try:
-                    os.remove(SUDOERS_PATH)               # ne jamais laisser un sudoers invalide
+                    os.remove(SUDOERS_PATH)               # never leave an invalid sudoers file
                 except OSError:
                     pass
                 raise
@@ -304,11 +303,11 @@ def up(scope: Scope, dns: str | None = None, sudo_user: str | None = None,
 
 
 # --------------------------------------------------------------------------- #
-# Entrée dans le namespace et vérification (processus PirateCrew, non root)
+# Entering the namespace and verification (PirateCrew process, non-root)
 # --------------------------------------------------------------------------- #
-_UP_HINT = "lancez « sudo python -m offense.netns up » puis relancez"
+_UP_HINT = "run `sudo python -m offense.netns up` then retry"
 _DEFAULT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-_HELPER_REFUSAL = "pc-netns-exec:"   # préfixe des refus du script d'aide (stderr)
+_HELPER_REFUSAL = "pc-netns-exec:"   # prefix of the helper script's refusals (stderr)
 
 
 def _is_root() -> bool:
@@ -316,16 +315,16 @@ def _is_root() -> bool:
 
 
 def wrap(argv: list[str]) -> list[str]:
-    """Préfixe `argv` pour l'exécuter dans le namespace via le script d'aide
-    (`sudo -n` si le processus n'est pas root : jamais de demande de mot de passe).
-    `sudo` est appelé par son chemin absolu : le PATH d'une mission commence
-    souvent par un répertoire inscriptible par l'utilisateur (venv/bin)."""
+    """Prefix `argv` so it runs in the namespace via the helper script
+    (`sudo -n` if the process is not root: never a password prompt).
+    `sudo` is called by its absolute path: a mission's PATH often starts
+    with a directory writable by the user (venv/bin)."""
     prefix = [] if _is_root() else ["/usr/bin/sudo", "-n"]
     return [*prefix, HELPER_PATH, *argv]
 
 
 def _element_networks(elem) -> list[ipaddress.IPv4Network]:
-    """Réseaux d'un élément de set nftables (JSON). Forme inconnue -> ValueError."""
+    """Networks of an nftables set element (JSON). Unknown shape -> ValueError."""
     if isinstance(elem, str):
         return [ipaddress.IPv4Network(elem)]
     if isinstance(elem, dict) and set(elem) == {"prefix"}:
@@ -335,95 +334,95 @@ def _element_networks(elem) -> list[ipaddress.IPv4Network]:
         first, last = elem["range"]
         return list(ipaddress.summarize_address_range(
             ipaddress.IPv4Address(first), ipaddress.IPv4Address(last)))
-    raise ValueError(f"élément de set inattendu : {elem!r}")
+    raise ValueError(f"unexpected set element: {elem!r}")
 
 
 def installed_networks(run=None) -> list[ipaddress.IPv4Network]:
-    """Réseaux réellement autorisés par le NOYAU (set nftables), fusionnés et triés.
+    """Networks actually allowed by the KERNEL (nftables set), merged and sorted.
 
-    Lit le set via le script d'aide (`--check`). Fail-closed : toute sortie
-    absente, illisible ou d'une forme non prévue lève NetnsError — jamais un
-    set « supposé conforme »."""
+    Reads the set via the helper script (`--check`). Fail-closed: any missing,
+    unreadable or unexpectedly shaped output raises NetnsError — never a set
+    "assumed to conform"."""
     run = run or _spawn
     argv = wrap(["--check"])
     try:
         proc = run(argv, capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.SubprocessError) as exc:
-        raise NetnsError(f"Périmètre réseau illisible ({type(exc).__name__}: {exc})") from exc
+        raise NetnsError(f"Network scope unreadable ({type(exc).__name__}: {exc})") from exc
     if proc.returncode != 0:
         detail = (proc.stderr or "").strip()
-        raise NetnsError(f"Périmètre réseau absent (code {proc.returncode})"
+        raise NetnsError(f"Network scope missing (code {proc.returncode})"
                          + (f" — {detail}" if detail else ""))
     try:
         data = json.loads(proc.stdout)
         sets = [obj["set"] for obj in data["nftables"] if isinstance(obj, dict) and "set" in obj]
         if len(sets) != 1:
-            raise ValueError(f"{len(sets)} set(s) dans la sortie nft")
+            raise ValueError(f"{len(sets)} set(s) in the nft output")
         networks: list[ipaddress.IPv4Network] = []
         for elem in sets[0].get("elem", []):
             networks.extend(_element_networks(elem))
     except (ValueError, KeyError, TypeError, AttributeError) as exc:
-        raise NetnsError(f"Sortie nft inattendue ({exc})") from exc
+        raise NetnsError(f"Unexpected nft output ({exc})") from exc
     return sorted(ipaddress.collapse_addresses(networks))
 
 
 def verify(scope: Scope, run=None) -> None:
-    """Lève NetnsError si le set du noyau n'est pas EXACTEMENT le périmètre `scope`."""
+    """Raise NetnsError if the kernel's set is not EXACTLY the `scope`."""
     if sys.platform != "linux":
-        raise NetnsError("Périmètre réseau indisponible hors Linux (network namespaces).")
+        raise NetnsError("Network scope unavailable outside Linux (network namespaces).")
     expected = scope_v4(scope)
     if not expected:
-        raise NetnsError("Périmètre sans entrée IPv4 : rien n'est autorisé au niveau réseau.")
+        raise NetnsError("Scope has no IPv4 entry: nothing is allowed at the network level.")
     try:
         installed = installed_networks(run)
     except NetnsError as exc:
         raise NetnsError(f"{exc} — {_UP_HINT}.") from exc
     if installed != expected:
         raise NetnsError(
-            f"Le périmètre réseau installé ({', '.join(map(str, installed)) or 'vide'}) ne "
-            f"correspond pas au périmètre actif ({', '.join(map(str, expected))}) — {_UP_HINT}.")
+            f"The installed network scope ({', '.join(map(str, installed)) or 'empty'}) does "
+            f"not match the active scope ({', '.join(map(str, expected))}) — {_UP_HINT}.")
 
 
 def run_isolated(argv: list[str], timeout: int = 120) -> str:
-    """Exécute `argv` dans le namespace filtré, après vérification du périmètre.
+    """Run `argv` in the filtered namespace, after verifying the scope.
 
-    La vérification est refaite à CHAQUE appel (pas de cache) : un scope.txt
-    modifié ou une table supprimée en cours de mission bloque dès la commande
-    suivante. Lève NetnsError ; n'exécute alors rien."""
+    The verification is redone on EVERY call (no cache): a modified scope.txt
+    or a table deleted mid-mission blocks from the very next command.
+    Raises NetnsError; nothing is run in that case."""
     scope = get_active_scope()
     if scope is None:
-        raise NetnsError("Aucun périmètre actif : exécution refusée.")
+        raise NetnsError("No active scope: execution refused.")
     verify(scope)
-    from tools.registry import _run  # lazy : évite un cycle d'import
-    # Ce qui suit s'exécute APRÈS la descente de privilèges du script d'aide :
-    # - `env PATH=…` rend à l'outil le PATH de la mission (sudo l'a remis à zéro),
-    #   celui-là même que `technique_available` a utilisé pour le trouver ;
-    # - `timeout -k 5` applique le délai là où il peut l'être : un processus non
-    #   root ne peut pas tuer `sudo` (EPERM), donc le délai de subprocess seul
-    #   bloquerait la mission. Le délai externe (+15 s) n'est qu'un filet.
+    from tools.registry import _run  # lazy: avoids an import cycle
+    # What follows runs AFTER the helper script drops privileges:
+    # - `env PATH=...` gives the tool the mission's PATH back (sudo reset it),
+    #   the very one `technique_available` used to find it;
+    # - `timeout -k 5` applies the deadline where it can be: a non-root
+    #   process cannot kill `sudo` (EPERM), so subprocess's own timeout alone
+    #   would hang the mission. The outer timeout (+15 s) is only a safety net.
     inner = ["env", f"PATH={os.environ.get('PATH') or _DEFAULT_PATH}",
              "timeout", "-k", "5", str(int(timeout)), *argv]
     out = _run(wrap(inner), timeout + 15)
     if out.startswith(_HELPER_REFUSAL):
-        # Namespace ou filtre disparu entre la vérification et l'exécution : le
-        # script d'aide a refusé, rien n'a tourné — blocage, pas sortie d'outil.
+        # Namespace or filter vanished between verification and execution: the
+        # helper script refused, nothing ran — a block, not tool output.
         raise NetnsError(f"{out} — {_UP_HINT}.")
     return out
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI : `python -m offense.netns {up,down,status} [--scope scope.txt] [--dns IP]`
-    (`up` et `down` en root)."""
+    """CLI: `python -m offense.netns {up,down,status} [--scope scope.txt] [--dns IP]`
+    (`up` and `down` as root)."""
     parser = argparse.ArgumentParser(
         prog="python -m offense.netns",
-        description="Périmètre réseau du chemin offensif (namespace + nftables).")
+        description="Network scope of the offensive path (namespace + nftables).")
     parser.add_argument("action", choices=["up", "down", "status"])
-    parser.add_argument("--scope", default="scope.txt", help="fichier de périmètre (défaut : scope.txt)")
-    parser.add_argument("--dns", default=None, help="résolveur IPv4 in-scope visible du namespace")
+    parser.add_argument("--scope", default="scope.txt", help="scope file (default: scope.txt)")
+    parser.add_argument("--dns", default=None, help="in-scope IPv4 resolver visible from the namespace")
     args = parser.parse_args(argv)
 
     if sys.platform != "linux":
-        print("offense.netns : Linux uniquement (network namespaces).", file=sys.stderr)
+        print("offense.netns: Linux only (network namespaces).", file=sys.stderr)
         return 2
     if args.action == "status":
         try:
@@ -431,23 +430,23 @@ def main(argv: list[str] | None = None) -> int:
         except NetnsError as exc:
             print(f"[NETNS] absent — {exc}")
             return 1
-        print(f"[NETNS] actif — sorties autorisées : {', '.join(map(str, installed)) or 'aucune'}")
+        print(f"[NETNS] active — allowed egress: {', '.join(map(str, installed)) or 'none'}")
         return 0
     if not _is_root():
-        print("offense.netns : à lancer en root (sudo python -m offense.netns …).", file=sys.stderr)
+        print("offense.netns: must be run as root (sudo python -m offense.netns ...).", file=sys.stderr)
         return 2
 
     if args.action == "down":
         down()
-        print(f"[NETNS] Namespace {NS_NAME} et table {NFT_TABLE} démontés.")
+        print(f"[NETNS] Namespace {NS_NAME} and table {NFT_TABLE} torn down.")
         return 0
     try:
         scope = load_scope(args.scope)
         up(scope, dns=args.dns, sudo_user=os.environ.get("SUDO_USER"))
     except (ScopeError, NetnsError) as exc:
-        print(f"[NETNS] Mise en place refusée : {exc}", file=sys.stderr)
+        print(f"[NETNS] Setup refused: {exc}", file=sys.stderr)
         return 1
-    print(f"[NETNS] Namespace {NS_NAME} en place — sorties autorisées : "
+    print(f"[NETNS] Namespace {NS_NAME} in place — allowed egress: "
           f"{', '.join(str(n) for n in scope_v4(scope))}")
     warning = loopback_warning(scope)
     if warning:

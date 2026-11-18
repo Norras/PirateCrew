@@ -1,10 +1,10 @@
-"""Preuve par le noyau de la cible de lab (offense.lab).
+"""Kernel-level proof of the lab target (offense.lab).
 
-Un service lancé dans le namespace de lab est joignable depuis la machine (la
-reconnaissance) ET depuis le namespace offensif (à travers le filtre), alors que
-la boucle locale de la machine reste hors d'atteinte du chemin offensif.
+A service started in the lab namespace is reachable from the machine (recon) AND
+from the offensive namespace (through the filter), while the machine's loopback
+stays out of reach of the offensive path.
 
-Lancement (Linux, root) :
+Run (Linux, root):
     sudo PIRATECREW_NETNS_IT=1 venv/bin/pytest tests/test_lab_integration.py -v
 """
 import os
@@ -27,8 +27,8 @@ PORT = "8017"
 
 @pytest.fixture(scope="module")
 def lab_bench():
-    # Sous /tmp et lisible par tous : le service tourne sous l'identité de
-    # l'appelant (pas root), qui ne peut pas lire le répertoire temporaire de pytest.
+    # Under /tmp and world-readable: the service runs as the caller (not root),
+    # who cannot read pytest's temporary directory.
     web = tempfile.mkdtemp(prefix="pc-it-lab-", dir="/tmp")
     os.chmod(web, 0o755)
     with open(os.path.join(web, "index.html"), "w", encoding="utf-8") as fh:
@@ -39,12 +39,12 @@ def lab_bench():
     serve = [sys.executable, "-m", "http.server", "--bind", "0.0.0.0", "--directory", str(web), PORT]
 
     lab.up()
-    # Le service du lab, lancé comme le ferait « offense.lab run » (identité de l'appelant).
+    # The lab service, started the way "offense.lab run" would (caller's identity).
     server = subprocess.Popen(lab.run_argv(serve, int(os.environ.get("SUDO_UID") or 0),
                                            int(os.environ.get("SUDO_GID") or 0)), **quiet)
     scope = Scope.from_lines([lab.LAB_ADDR])
     try:
-        _wait_port(lab.LAB_ADDR, int(PORT))          # depuis la machine : la reconnaissance l'atteint
+        _wait_port(lab.LAB_ADDR, int(PORT))          # from the machine: recon reaches it
         netns.up(scope)
         yield scope
     finally:
@@ -73,14 +73,14 @@ def test_product_path_reaches_the_lab():
 
 
 def test_lab_service_is_not_on_the_machine_loopback():
-    # Le service vit dans le lab : rien n'écoute sur ce port côté machine, et la
-    # boucle locale reste de toute façon hors d'atteinte du chemin offensif.
+    # The service lives in the lab: nothing listens on this port on the machine
+    # side, and the loopback stays out of reach of the offensive path anyway.
     assert sh("curl", "-s", "-m", "2", f"http://127.0.0.1:{PORT}/", check=False).stdout == ""
     assert MARKER not in netns.run_isolated([*CURL, f"http://127.0.0.1:{PORT}/"])
 
 
 def test_machine_side_of_the_lab_link_stays_closed_to_the_offensive_path():
-    # L'adresse de la machine sur le lien du lab n'est pas dans le périmètre.
+    # The machine's address on the lab link is not in scope.
     assert MARKER not in netns.run_isolated([*CURL, f"http://{lab.LAB_HOST_ADDR}:{PORT}/"])
 
 
@@ -91,8 +91,8 @@ def test_lab_service_runs_as_the_caller():
 
 
 def test_lab_down_removes_namespace_and_link():
-    # Démontage PUIS remise en place : `up` est idempotent, les autres tests du
-    # module n'en dépendent plus (celui-ci passe en dernier).
+    # Teardown THEN set-up again: `up` is idempotent, and the other tests in the
+    # module no longer depend on it (this one runs last).
     lab.down()
     assert not lab.is_up()
     assert sh("ip", "link", "show", lab.LAB_HOST_IF, check=False).returncode != 0

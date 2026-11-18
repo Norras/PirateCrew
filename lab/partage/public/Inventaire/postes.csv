@@ -1,5 +1,5 @@
-poste,utilisateur,systeme,emplacement
-PC-CAPITAINE,a.bonny,Windows 11,Bureau direction
-PC-ADMIN,m.read,Debian 13,Salle serveur
-PC-COMPTA,j.rackham,Windows 11,Bureau comptabilité
-SRV-INTRANET,svc-sauvegarde,Debian 13,Salle serveur
+host,user,system,location
+PC-CAPITAINE,a.bonny,Windows 11,Executive office
+PC-ADMIN,m.read,Debian 13,Server room
+PC-COMPTA,j.rackham,Windows 11,Accounting office
+SRV-INTRANET,svc-sauvegarde,Debian 13,Server room
