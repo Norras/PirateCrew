@@ -29,6 +29,7 @@ class Technique:
     command_template: str  # gabarit ; placeholders {target} {user} {hash} ...
     success_signal: str    # motif indiquant le succès dans la sortie
     provided_by: str       # "builtin" | "operator"
+    opens_session: bool = False  # la réussite ouvre une session (non autorisée par défaut)
 
 
 def _technique_from_dict(entry: dict) -> Technique:
@@ -37,11 +38,13 @@ def _technique_from_dict(entry: dict) -> Technique:
         name=entry.get("name", entry["id"]),
         domain=entry.get("domain", ""),
         service=entry.get("service", ""),
-        requires=set(entry.get("requires") or []),
+        requires=set([entry["requires"]] if isinstance(entry.get("requires"), str)
+                     else (entry.get("requires") or [])),
         tool=entry.get("tool", ""),
         command_template=entry.get("command_template", ""),
         success_signal=entry.get("success_signal", ""),
         provided_by=entry.get("provided_by", "builtin"),
+        opens_session=entry.get("opens_session", False),
     )
 
 

@@ -2,6 +2,9 @@ import os
 import re
 import shutil
 import socket
+import offense.executor
+import offense.netns
+import offense.catalog_author
 from typing import TypedDict, List, Dict, Any, Literal
 from dotenv import load_dotenv
 from langchain_anthropic import ChatAnthropic
@@ -9,7 +12,7 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
 
 from scope import load_scope, set_active_scope, ScopeError
-from state.world_model import WorldModel, Credential, inputs_fingerprint
+from state.world_model import WorldModel, Credential, Session, inputs_fingerprint
 from state import mission_io
 from catalog import load_catalog, techniques_for, technique_by_id
 
@@ -35,6 +38,23 @@ def is_verbose() -> bool:
     return _VERBOSE
 
 
+# --- Mode propose-only ------------------------------------------------------ #
+# Activable par PIRATECREW_PROPOSE_ONLY (1/true/on/oui) : les techniques
+# rédigées par le LLM sont proposées/persistées mais JAMAIS exécutées.
+_PROPOSE_ONLY = os.getenv("PIRATECREW_PROPOSE_ONLY", "").strip().lower() in ("1", "true", "yes", "on", "oui")
+
+
+def set_propose_only(on: bool) -> None:
+    """Active/désactive le mode propose-only du processus."""
+    global _PROPOSE_ONLY
+    _PROPOSE_ONLY = bool(on)
+
+
+def is_propose_only() -> bool:
+    """État courant du mode propose-only."""
+    return _PROPOSE_ONLY
+
+
 def _vprint(msg: str) -> None:
     """Imprime une ligne de diagnostic UNIQUEMENT si le mode verbose est actif."""
     if _VERBOSE:
@@ -43,6 +63,14 @@ def _vprint(msg: str) -> None:
 
 # Catalogue chargé une fois (lecture YAML légère, builtin + operator).
 _CATALOG = load_catalog()
+# Surcouche par mission (clé thread_id) : techniques auteurées par le LLM, isolées
+# entre missions d'un même processus (le REPL en enchaîne plusieurs).
+_MISSION_CATALOG: Dict[str, list] = {}
+
+
+def _effective_catalog(thread_id: str) -> list:
+    """Catalogue de base + techniques LLM propres à cette mission."""
+    return _CATALOG + _MISSION_CATALOG.get(thread_id, [])
 
 # --- REGISTRE DE MISSION ---------------------------------------------------- #
 # Le WorldModel est tenu PAR RÉFÉRENCE ici, indexé par thread_id, et PAS
@@ -75,6 +103,72 @@ def get_world(thread_id: str) -> WorldModel:
     return world
 
 
+def _pending_sessions(world: WorldModel) -> List[Session]:
+    """Sessions vivantes obtenues mais pas encore autorisées par l'opérateur (gate)."""
+    return [s for s in world.sessions if s.alive and not s.authorized]
+
+
+def resume_with_authorization(prev_thread_id: str, host: str, target: str) -> str | None:
+    """Autorise les sessions de `host` dans le monde de `prev_thread_id` et prépare la
+    reprise : un nouveau thread_id pointe sur le MÊME objet WorldModel (registre, ledger
+    et session autorisée conservés). Renvoie le nouveau thread_id, ou None s'il n'y a
+    rien à autoriser. L'invoke LangGraph est fait par l'appelant (REPL)."""
+    world = _MISSIONS.get(prev_thread_id)
+    if world is None:
+        return None
+    if authorize_sessions(world, host) == 0:
+        return None
+    new_id = mission_io.new_mission_id(target)
+    _MISSIONS[new_id] = world
+    # La surcouche de techniques LLM suit le monde : sans elle, la technique que
+    # l'opérateur vient d'autoriser ne serait plus planifiable (l'auteur ne la
+    # réécrit pas, elle figure déjà dans les preuves de la mission).
+    if prev_thread_id in _MISSION_CATALOG:
+        _MISSION_CATALOG[new_id] = _MISSION_CATALOG[prev_thread_id]
+    return new_id
+
+
+def _last_mission_after(prev: tuple, mission_id: str, target: str) -> tuple:
+    """(id, cible) de la dernière MISSION après un tour du REPL. Un tour sans monde
+    de mission (question, RAG, analyse de code) ne remplace pas la précédente :
+    « authorize » et « sessions » doivent continuer à viser ses sessions en attente."""
+    return (mission_id, target) if mission_id in _MISSIONS else prev
+
+
+# Promotion RAG en attente : textes candidats de la dernière mission, écrits dans
+# le RAG partagé UNIQUEMENT sur ordre de l'opérateur (commande « promote »).
+_PENDING_PROMOTION: List[dict] = []
+
+
+def queue_promotion(thread_id: str) -> List[str]:
+    """Prépare la promotion RAG des techniques LLM de la mission SANS rien écrire.
+
+    Renvoie les textes qui seraient stockés, pour relecture par l'opérateur ;
+    `promote_pending` les écrit ensuite. Le filtre automatique (secrets, principals,
+    noms d'hôte connus du WorldModel, IP, jetons à forte entropie) n'est qu'un
+    pré-tri : il ne reconnaît pas toute donnée de cible, d'où l'accord explicite."""
+    world = _MISSIONS.get(thread_id)
+    forbidden: List[str] = []
+    if world is not None:
+        for c in world.credentials:
+            forbidden += [v for v in (c.secret, c.principal) if v]
+        for h in world.hosts.values():
+            if h.hostname:
+                name = h.hostname.rstrip(".")
+                forbidden += [name, name.split(".", 1)[0], name.split(".", 1)[-1]]
+    _PENDING_PROMOTION[:] = offense.catalog_author.rag_candidates(
+        _MISSION_CATALOG.get(thread_id, []), forbidden)
+    return [c["text"] for c in _PENDING_PROMOTION]
+
+
+def promote_pending(store=None) -> int:
+    """Écrit dans le RAG les candidats en attente (ordre de l'opérateur) et vide la
+    file. Renvoie le nombre écrit ; en cas d'échec du store, la file est conservée."""
+    written = offense.catalog_author.store_candidates(list(_PENDING_PROMOTION), store=store)
+    _PENDING_PROMOTION.clear()
+    return written
+
+
 # --- 1. ÉTAT GLOBAL DE LA MISSION & DES REQUÊTES ---------------------------- #
 class MissionState(TypedDict, total=False):
     question: str
@@ -91,9 +185,27 @@ class MissionState(TypedDict, total=False):
     execution_reports: List[Dict[str, Any]]
     final_response: str
     mission_success: bool
+    netns_missing: bool  # périmètre réseau absent ce cycle : chemin operator/llm non exécutable
+    resume: bool         # reprise après « authorize » : mission directe, sans routage LLM
 
 
 llm = ChatAnthropic(model="claude-sonnet-4-6")
+
+
+def _author_model_name() -> str:
+    """Modèle de l'auteur de techniques LLM, configurable par l'env
+    `PIRATECREW_AUTHOR_MODEL` (défaut : le modèle partagé de l'orchestrateur).
+
+    Permet de piloter l'auteur indépendamment du routeur/décideur (`llm`
+    ci-dessus) — p. ex. un modèle plus capable pour écrire des techniques —
+    sans toucher au reste de l'orchestrateur.
+    """
+    return os.getenv("PIRATECREW_AUTHOR_MODEL", "claude-sonnet-4-6")
+
+
+# Instance dédiée à l'auteur : lit l'env à l'import (le REPL/CLI fixe l'env
+# avant lancement). Par défaut, même modèle que `llm`.
+author_llm = ChatAnthropic(model=_author_model_name())
 
 # Détection des services à partir de la sortie (texte libre) d'un agent de recon.
 KNOWN_SERVICES = ["https", "http", "smb", "netbios", "ldap", "ftp", "ssh",
@@ -161,13 +273,49 @@ def technique_available(tech) -> bool:
     return shutil.which(tool) is not None
 
 
-def _render_template(template: str, host: str, port: int = 0) -> str:
-    """Rend un gabarit de commande avec {target}/{port}. Un placeholder inconnu
-    (ex. {user}, {hash}) renvoie le gabarit brut, sans lever."""
+def _split_principal(principal: str) -> tuple:
+    """Découpe un principal en (domaine, utilisateur) : `CORP\\user`,
+    `user@corp.local` ou `user` (domaine vide)."""
+    if "\\" in principal:
+        domain, _, user = principal.partition("\\")
+        return domain, user
+    if "@" in principal:
+        user, _, domain = principal.partition("@")
+        return domain, user
+    return "", principal
+
+
+def _render_subs(host: str, port: int = 0, creds: list | None = None,
+                 context: dict | None = None) -> Dict[str, Any]:
+    """Substitutions DISPONIBLES pour un gabarit : {target}/{port}, puis
+    {user}/{domain}/{hash}/{password}/{secret} si `creds`, et {share} si `context`.
+    Un gabarit dont un champ ne figure pas ici n'est pas remplissable."""
+    subs: Dict[str, Any] = {"target": host, "port": port}
+    if creds:
+        domain, user = _split_principal(creds[0].principal)
+        subs.update(user=user, domain=domain, hash=creds[0].secret,
+                    password=creds[0].secret, secret=creds[0].secret)
+    if context and "share" in context:
+        subs["share"] = context["share"]
+    return subs
+
+
+def _template_fields(template: str) -> list[str]:
+    """Champs nommés référencés par un gabarit (`{user}`, `{share}`, …)."""
+    import string
+    return [fn for _, fn, _, _ in string.Formatter().parse(template or "") if fn]
+
+
+def _render_template(template: str, host: str, port: int = 0,
+                     creds: list | None = None, context: dict | None = None) -> str:
+    """Rend un gabarit avec les substitutions disponibles (_render_subs). Un
+    placeholder inconnu renvoie le gabarit brut, sans lever (contrat Projet 1
+    conservé ; le chemin d'exécution, lui, refuse en amont un champ non
+    remplissable au lieu d'exécuter le gabarit brut, cf. node_execute)."""
     if not template:
         return ""
     try:
-        return template.format(target=host, port=port)
+        return template.format(**_render_subs(host, port, creds, context))
     except (KeyError, IndexError, ValueError):
         return template
 
@@ -205,6 +353,11 @@ def _parse_services(text: str) -> List[str]:
 
 # --- 2. SUPERVISEUR MAÎTRE (Le Routeur) ------------------------------------- #
 def master_supervisor(state: MissionState) -> Literal["delegate_pirate", "delegate_analyst", "autonomous_mission", "general_response"]:
+    if state.get("resume"):
+        # Reprise après « authorize » : l'autorisation est déjà consommée, la mission
+        # repart sans dépendre d'un classement LLM qui pourrait l'envoyer ailleurs.
+        print("\n[MASTER] Reprise après autorisation : mission autonome.")
+        return "autonomous_mission"
     print("\n[MASTER] Analyse de la requête par l'orchestrateur...")
     question = state.get("question", "")
 
@@ -273,6 +426,17 @@ def enter_autonomous_mission(state: MissionState, config):
     set_active_scope(scope)
     start_mission(thread_id, scope)
     print(f"[SCOPE] Périmètre chargé : {len(scope.networks)} entrée(s). Mission {thread_id!r} démarrée.")
+    # Périmètre réseau (namespace + nftables) : requis par le chemin offensif
+    # déterministe uniquement. Son absence ne refuse pas la mission — la
+    # reconnaissance et les outils builtin restent utilisables — mais on le dit d'emblée.
+    try:
+        offense.netns.verify(scope)
+        print(f"[NETNS] Périmètre réseau actif ({offense.netns.NS_NAME}).")
+        warning = offense.netns.loopback_warning(scope)
+        if warning:
+            print(warning)
+    except offense.netns.NetnsError as exc:
+        print(f"[NETNS] Chemin offensif désactivé : {exc}")
     return {"thread_id": thread_id, "cycle": 0, "max_cycles": state.get("max_cycles", 6),
             "finished": False}
 
@@ -287,9 +451,21 @@ def _requires_satisfied(world: WorldModel, host: str, service: str, requires: se
     for req in requires:
         if req == "credential" and not world.creds_applicable(service):
             return False
-        if req == "session" and not any(s.host == host and s.alive for s in world.sessions):
+        if req == "session" and not any(
+                s.host == host and s.alive and s.authorized for s in world.sessions):
             return False
     return True
+
+
+def authorize_sessions(world: WorldModel, host: str) -> int:
+    """Autorise les sessions vivantes de `host` pas encore autorisées ;
+    renvoie le nombre de sessions modifiées."""
+    n = 0
+    for s in world.sessions:
+        if s.host == host and s.alive and not s.authorized:
+            s.authorized = True
+            n += 1
+    return n
 
 
 def _task_inputs_fp(world: WorldModel, service: str, requires: set) -> str:
@@ -503,10 +679,115 @@ def node_recon(state: MissionState, config):
             "max_cycles": state.get("max_cycles", 6)}
 
 
+def _dry_services(world: WorldModel, catalog, planned) -> List[str]:
+    """Services in-scope « à sec » à confier à l'auteur LLM : nom non vide, absents
+    des tâches planifiées, et sans technique OU dont toutes les techniques sont
+    déjà tentées (vrai trou de catalogue, pas une attente de prérequis)."""
+    planned_services = {t.get("service") for t in planned}
+    out: List[str] = []
+    for h in world.in_scope_hosts():
+        for svc in h.services:
+            name = svc.name
+            if not name or name in planned_services or name in out:
+                continue
+            techs = techniques_for(catalog, name)
+            if all(any(k[0] == h.ip and k[1] == name and k[2] == t.id and k[4] == svc.port
+                       for k in world.technique_ledger) for t in techs):
+                out.append(name)
+    return out
+
+
+def _already_authored(world: WorldModel, service: str) -> bool:
+    """Vrai si l'auteur LLM a déjà rédigé une technique pour ce service (une fois par mission)."""
+    return any(e.get("kind") == "llm_technique" and e.get("service") == service
+               for e in world.evidence)
+
+
+def _redact(text: str, secrets) -> str:
+    """Masque (***) les secrets connus ET les jetons à forte entropie (hash/clé/
+    token, même inconnus) avant que le texte n'aille au LLM."""
+    for s in secrets:
+        if s and len(s) >= 3:
+            text = text.replace(s, "***")
+    return offense.catalog_author._HIGH_ENTROPY.sub("***", text)
+
+
+def _execute_excerpt(world: WorldModel, tech_id: str, host: str,
+                     secrets=(), limit: int = 200) -> str:
+    """Extrait de la dernière sortie d'exécution pour (tech_id, host), expurgé
+    des secrets connus PUIS tronqué (l'ordre évite tout secret coupé en deux)."""
+    raw = ""
+    for e in world.evidence:
+        if (e.get("phase") == "execute" and e.get("technique") == tech_id
+                and e.get("host") == host):
+            raw = e.get("raw", "") or ""
+    if not raw:
+        return "(pas de sortie capturée)"
+    cleaned = _redact(str(raw).replace("\n", " ").replace("\r", " "), secrets)
+    return cleaned[:limit]
+
+
+def _author_context(world: WorldModel, service: str) -> str:
+    """Contexte réel de la mission pour l'auteur LLM d'une technique sur `service`.
+
+    Assemble depuis le WorldModel : version(s)/port(s) du service visé sur les
+    hôtes in-scope, services voisins, principals des credentials applicables, et
+    les techniques déjà tentées pour ce service avec un extrait tronqué de leur
+    résultat. Les extraits de sortie sont EXPURGÉS des secrets connus (masqués
+    par ***) ; seuls les principals des credentials sont cités — ce texte part
+    au LLM, comme le contexte du chemin agent existant.
+    """
+    secrets = [c.secret for c in world.credentials if c.secret]
+    lines: List[str] = []
+    targets: List[str] = []
+    neighbors = set()
+    for h in world.in_scope_hosts():
+        for s in h.services:
+            if s.name == service:
+                targets.append(f"{h.ip}:{s.port} ({s.version or 'version inconnue'})")
+            elif s.name:
+                neighbors.add(s.name)
+    lines.append("Service visé : " + ("; ".join(targets) if targets else service))
+    if neighbors:
+        lines.append("Autres services sur le(s) hôte(s) : " + ", ".join(sorted(neighbors)))
+    principals = [c.principal for c in world.creds_applicable(service)]
+    lines.append("Credentials disponibles (principals) : "
+                 + (", ".join(principals) if principals else "aucun"))
+    tried: List[str] = []
+    for (h_ip, svc, tech_id, _fp, port), status in world.technique_ledger.items():
+        if svc != service:
+            continue
+        tried.append(f"{tech_id} sur {h_ip}:{port} -> {status} ; résultat : "
+                     + _execute_excerpt(world, tech_id, h_ip, secrets))
+    if tried:
+        lines.append("Déjà tenté (NE PAS reproposer) :\n- " + "\n- ".join(tried))
+    else:
+        lines.append("Aucune technique encore tentée pour ce service.")
+    return "\n".join(lines)
+
+
 def node_decide(state: MissionState, config):
     thread_id = config["configurable"]["thread_id"]
     world = get_world(thread_id)
-    tasks = plan_tasks(world, _CATALOG)
+    tasks = plan_tasks(world, _effective_catalog(thread_id))
+    if not tasks:
+        authored = False
+        for svc in _dry_services(world, _effective_catalog(thread_id), tasks):
+            if _already_authored(world, svc):
+                continue
+            tech = offense.catalog_author.author_technique(
+                svc, _author_context(world, svc),
+                lambda p: author_llm.invoke(p).content)
+            if tech:
+                _MISSION_CATALOG.setdefault(thread_id, []).append(tech)
+                try:
+                    offense.catalog_author.persist_llm_technique(tech, thread_id)
+                except Exception as exc:  # noqa: BLE001 - best-effort
+                    _vprint(f"Persistance technique LLM échouée : {type(exc).__name__}")
+                world.add_evidence({"kind": "llm_technique", "service": svc, "id": tech.id})
+                authored = True
+        if authored:
+            tasks = plan_tasks(world, _effective_catalog(thread_id))
     _vprint("Tâches planifiées : " + str(
         [f"{t['host']}:{t['port']}/{t['service']}→{t['technique_id']}" for t in tasks] or "aucune"))
     services = state.get("discovered_services", [])
@@ -528,7 +809,7 @@ def node_execute(state: MissionState, config):
     world = get_world(thread_id)
     reports: List[Dict[str, Any]] = []
     for task in state.get("planned", []):
-        tech = technique_by_id(_CATALOG, task["technique_id"])
+        tech = technique_by_id(_effective_catalog(thread_id), task["technique_id"])
         port = int(task.get("port", 0) or 0)
         inputs_fp = task.get("inputs_fp", "")
         # Escalade « outil manquant » (Option Y) : outil requis absent ⇒ on
@@ -541,6 +822,57 @@ def node_execute(state: MissionState, config):
             reports.append({"technique": tech.id, "host": task["host"],
                             "service": task["service"], "port": port, "inputs_fp": inputs_fp,
                             "status": "blocked_missing_tool", "tool": tech.tool, "detail": msg})
+            continue
+        # Chemin offensif DÉTERMINISTE (operator/llm) : rendu + exécuteur gardé,
+        # jamais via l'agent LLM. Les techniques builtin gardent le chemin agent.
+        if tech.provided_by in ("operator", "llm"):
+            if is_propose_only() and tech.provided_by == "llm":
+                reports.append({"technique": tech.id, "host": task["host"],
+                                "service": task["service"], "port": port, "inputs_fp": inputs_fp,
+                                "status": "proposed_awaiting_operator",
+                                "detail": "Technique LLM proposée, en attente de validation opérateur."})
+                continue
+            creds = world.creds_applicable(task["service"])
+            # Périmètre (contrôle de référence) : tout hôte LITTÉRAL du gabarit doit être
+            # in-scope — les noms sont résolus. {target} est in-scope par construction ;
+            # {domain}/{share} sont des identités, pas des hôtes. Hors périmètre -> on
+            # n'exécute pas, on remonte à l'opérateur (qui peut l'ajouter au périmètre).
+            from offense.guardrails import scope_literal_violations as _scope_literal_violations
+            _bad_scope = _scope_literal_violations(tech.command_template)
+            if _bad_scope:
+                detail = (f"Hôte(s) hors périmètre : {', '.join(_bad_scope)} — "
+                          f"ajoutez-les au périmètre (scope.txt) pour les autoriser.")
+                world.add_evidence({"kind": "out_of_scope", "technique": tech.id,
+                                    "host": task["host"], "literals": ", ".join(_bad_scope)})
+                reports.append({"technique": tech.id, "host": task["host"], "service": task["service"],
+                                "port": port, "inputs_fp": inputs_fp,
+                                "status": "blocked_out_of_scope", "detail": detail})
+                continue
+            # Refus fail-visible d'un gabarit à placeholder non remplissable (ex. {share}
+            # sans valeur) : on N'exécute PAS un gabarit brut (accolades littérales), on
+            # remonte l'entrée manquante. Le ledger le marque 'tried' (boucle-sûr).
+            _subs = _render_subs(task["host"], port, creds=creds)
+            _missing = sorted({f for f in _template_fields(tech.command_template) if f not in _subs})
+            if _missing:
+                detail = f"Entrée(s) requise(s) non disponible(s) : {', '.join(_missing)}"
+                world.add_evidence({"kind": "missing_input", "technique": tech.id,
+                                    "host": task["host"], "fields": ", ".join(_missing)})
+                reports.append({"technique": tech.id, "host": task["host"], "service": task["service"],
+                                "port": port, "inputs_fp": inputs_fp,
+                                "status": "blocked_missing_input", "detail": detail})
+                continue
+            rendered = _render_template(tech.command_template, task["host"], port, creds=creds)
+            status, raw = offense.executor.execute_command(rendered, timeout=120)
+            world.add_evidence({"phase": "execute", "technique": tech.id, "host": task["host"],
+                                "raw": raw, "rendered": rendered})
+            if status == "done":
+                reconcile_evidence(world, raw)
+                if tech.opens_session and tech.success_signal and tech.success_signal in raw:
+                    world.add_session(Session(host=task["host"], channel=(tech.tool or tech.id),
+                                              via_cred=(creds[0].principal if creds else None),
+                                              authorized=False))
+            reports.append({"technique": tech.id, "host": task["host"], "service": task["service"],
+                            "port": port, "inputs_fp": inputs_fp, "status": status, "detail": raw})
             continue
         from agents.dynamic_agent import build_task_agent
         domain = SERVICE_DOMAIN.get(task["service"], tech.domain or "network")
@@ -574,17 +906,24 @@ def node_integrate(state: MissionState, config):
     thread_id = config["configurable"]["thread_id"]
     world = get_world(thread_id)
     reports = state.get("execution_reports", [])
-    # Ne marque « tentée » que ce qui a RÉELLEMENT tourné (done/error). Une
+    # Ne marque « tentée » que ce qui a tourné (done/error) ou été bloqué par un garde-fou
+    # (évite le re-spin). Une
     # technique bloquée par un outil manquant n'est pas grillée : elle reste
     # replanifiable après installation + relance (Option Y). Clé par (entrées, port).
     for report in reports:
-        if report.get("status") in ("done", "error"):
+        if report.get("status") in ("done", "error", "blocked_destructive",
+                                    "blocked_out_of_scope", "blocked_shell_meta",
+                                    "blocked_missing_input"):
             world.mark_technique(report["host"], report["service"], report["technique"],
                                  report.get("inputs_fp", ""), status="tried",
                                  port=int(report.get("port", 0) or 0))
-    # Back-stop R1 : récupère creds/hosts dans les sorties brutes.
+    # Back-stop R1 : récupère creds/hosts dans les sorties brutes. Un blocage
+    # « périmètre réseau absent » n'est pas une sortie d'outil : son message (qui
+    # cite des adresses du périmètre) ne doit pas alimenter le modèle du monde.
     added = 0
     for report in reports:
+        if report.get("status") == "blocked_no_netns":
+            continue
         added += reconcile_evidence(world, report.get("detail", ""))
     cycle = state.get("cycle", 0) + 1
     summary = (f"Mission (cycle {cycle}) : {len(world.in_scope_hosts())} hôte(s) in-scope, "
@@ -597,13 +936,20 @@ def node_integrate(state: MissionState, config):
         hints = " ; ".join(f"{t} (`sudo apt install -y {t}`)" for t in missing)
         summary += ("\n⚠ Techniques en attente d'un outil absent : " + hints +
                     ". Installe-le(s) dans l'environnement (Kali) puis relance la même mission pour les débloquer.")
+    # Escalade « périmètre réseau absent » : même contrat que l'outil manquant —
+    # les techniques operator/llm ne sont PAS marquées (replanifiables après mise
+    # en place du namespace), l'opérateur est prévenu une fois par cycle.
+    netns_blocked = [r for r in reports if r.get("status") == "blocked_no_netns"]
+    if netns_blocked:
+        summary += (f"\n⚠ {len(netns_blocked)} technique(s) en attente du périmètre réseau. "
+                    "Périmètre réseau non en place : lancez « sudo python -m offense.netns up » puis relancez.")
     print(f"[MISSION] Intégration : {summary}")
     # Persistance à chaque cycle : les trouvailles survivent à un crash/interruption.
     try:
         mission_io.save_world(world, thread_id)
     except Exception as e:  # persistance au mieux : ne jamais interrompre la mission
         print(f"[MISSION] avertissement: persistance échouée ({type(e).__name__})")
-    return {"cycle": cycle, "final_response": summary}
+    return {"cycle": cycle, "final_response": summary, "netns_missing": bool(netns_blocked)}
 
 
 def route_after_integrate(state: MissionState) -> Literal["continue", "finish"]:
@@ -620,8 +966,17 @@ def route_after_integrate(state: MissionState) -> Literal["continue", "finish"]:
         # On ne continue QUE s'il reste une tâche réellement EXÉCUTABLE. Les tâches
         # bloquées par un outil absent sont signalées mais ne font pas tourner la
         # boucle à vide jusqu'au cap de cycles (cf. escalade Option Y).
-        runnable = [t for t in plan_tasks(world, _CATALOG)
-                    if technique_available(technique_by_id(_CATALOG, t["technique_id"]))]
+        # Idem sans périmètre réseau : les techniques operator/llm ne sont pas exécutables.
+        cat = _effective_catalog(thread_id)
+        netns_missing = bool(state.get("netns_missing"))
+        runnable = []
+        for t in plan_tasks(world, cat):
+            tech = technique_by_id(cat, t["technique_id"])
+            if not technique_available(tech):
+                continue
+            if netns_missing and tech.provided_by in ("operator", "llm"):
+                continue
+            runnable.append(t)
         if not runnable:
             print("\n[MISSION] Épuisement : plus aucune tâche exécutable in-scope — fin.")
             return "finish"
@@ -699,6 +1054,8 @@ if __name__ == "__main__":
     else:
         print("Astuce : tapez « verbose » pour activer les diagnostics détaillés (ports/services/tâches).")
 
+    _last_mission_id, _last_target = None, None
+
     while True:
         try:
             user_input = input("\nVous > ")
@@ -718,16 +1075,65 @@ if __name__ == "__main__":
                 print(f"[VERBOSE] mode {'activé' if is_verbose() else 'désactivé'}.")
                 continue
 
+            # Propose-only (auteur LLM : propose sans exécuter) : « propose-only [on|off] ».
+            if _parts[0] == "propose-only":
+                if len(_parts) == 1:
+                    set_propose_only(not is_propose_only())
+                else:
+                    set_propose_only(_parts[1] in ("on", "1", "true", "yes", "oui"))
+                print(f"[PROPOSE-ONLY] mode {'activé' if is_propose_only() else 'désactivé'}.")
+                continue
+
+            # Liste des sessions de la dernière mission.
+            if _parts[0] == "sessions":
+                _w = _MISSIONS.get(_last_mission_id) if _last_mission_id else None
+                if _w is None or not _w.sessions:
+                    print("[SESSIONS] aucune session.")
+                else:
+                    for _s in _w.sessions:
+                        _etat = "autorisée" if _s.authorized else "en attente"
+                        print(f"[SESSIONS] {_s.host} / {_s.channel} — {_etat}")
+                continue
+
+            # Écriture dans le RAG partagé des techniques LLM proposées en fin de
+            # mission : uniquement sur cet ordre explicite de l'opérateur.
+            if _parts[0] == "promote":
+                try:
+                    _n = promote_pending()
+                    print(f"[PROMOTE] {_n} technique(s) ajoutée(s) au RAG." if _n
+                          else "[PROMOTE] rien à promouvoir.")
+                except Exception as exc:
+                    print(f"[PROMOTE] échec ({type(exc).__name__}) — rien n'a été ajouté.")
+                continue
+
             # Cible = première IP mentionnée dans la requête, sinon 127.0.0.1.
             _ipm = re.search(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", user_input)
-            target = _ipm.group(0) if _ipm else "127.0.0.1"
 
-            # Identité de mission : un mission_id par exécution = thread_id.
-            mission_id = mission_io.new_mission_id(target)
+            _resume = False
+            if _parts[0] == "authorize":
+                if not _ipm:
+                    print("[AUTHORIZE] usage : authorize <hôte (IPv4)>")
+                    continue
+                _host = _ipm.group(0)
+                new_id = (resume_with_authorization(_last_mission_id, _host, _last_target)
+                          if _last_mission_id else None)
+                if not new_id:
+                    print(f"[AUTHORIZE] aucune session en attente à autoriser pour {_host}.")
+                    continue
+                print(f"[AUTHORIZE] session(s) de {_host} autorisée(s) — reprise de la mission.")
+                _question = f"Lance la reprise post-exploitation de {_host} (audit/exploitation de la cible)"
+                mission_id, target = new_id, _last_target
+                user_input = _question
+                _resume = True
+            else:
+                target = _ipm.group(0) if _ipm else "127.0.0.1"
+                # Identité de mission : un mission_id par exécution = thread_id.
+                mission_id = mission_io.new_mission_id(target)
             config = {"configurable": {"thread_id": mission_id}}
 
             initial_state = {
                 "question": user_input,
+                "resume": _resume,
                 "target": target,
                 "goal": user_input,
                 "thread_id": mission_id,
@@ -757,7 +1163,29 @@ if __name__ == "__main__":
                         print(f"\n[MISSION] Rapport : {report_path}")
                     except Exception as exc:
                         print(f"[MISSION] avertissement: persistance échouée ({type(exc).__name__})")
+                    # Boucle d'apprentissage : les techniques rédigées par l'auteur
+                    # LLM sont PROPOSÉES pour le RAG partagé, jamais écrites d'office —
+                    # l'opérateur relit ce qui serait stocké puis tape « promote ».
+                    try:
+                        _cands = queue_promotion(mission_id)
+                        if _cands:
+                            print(f"[MISSION] {len(_cands)} technique(s) LLM proposée(s) pour le RAG partagé. "
+                                  "Relisez-les, puis tapez « promote » pour les y ajouter :")
+                            for _c in _cands:
+                                print(f"  - {_c}")
+                    except Exception as exc:
+                        print(f"[MISSION] avertissement: préparation de la promotion RAG échouée ({type(exc).__name__})")
+            # Dernière MISSION connue (un tour sans mission ne la remplace pas).
+            _last_mission_id, _last_target = _last_mission_after(
+                (_last_mission_id, _last_target), mission_id, target)
             print(f"\nPirateCrew >\n{result.get('final_response', 'Aucune réponse générée.')}")
+            # Gate session : remonte les sessions obtenues mais non autorisées.
+            _w = _MISSIONS.get(mission_id)
+            _pend = _pending_sessions(_w) if _w is not None else []
+            if _pend:
+                _liste = ", ".join(f"{s.host}/{s.channel}" for s in _pend)
+                print(f"⏸ Session(s) en attente d'autorisation : {_liste} — "
+                      f"tapez « authorize <hôte> » pour lancer la post-exploitation.")
         except KeyboardInterrupt:
             print("\nInterruption. Sortie.")
             break

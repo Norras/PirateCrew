@@ -18,8 +18,70 @@ def test_plan_tasks_filters_by_requires_and_ledger():
                for t in tasks)
 
 
+def test_author_model_configurable_par_env(monkeypatch):
+    import orchestrator as o
+    monkeypatch.delenv("PIRATECREW_AUTHOR_MODEL", raising=False)
+    assert o._author_model_name() == "claude-sonnet-4-6"
+    monkeypatch.setenv("PIRATECREW_AUTHOR_MODEL", "claude-opus-4-8")
+    assert o._author_model_name() == "claude-opus-4-8"
+
+
 def test_route_finishes_on_cycle_cap():
     assert route_after_integrate({"cycle": 6, "max_cycles": 6}) == "finish"
+
+
+def test_author_context_rich():
+    from orchestrator import _author_context
+    w = WorldModel(scope=Scope.from_lines(["10.0.0.0/24"]))
+    w.add_service("10.0.0.5", 445, name="smb", version="Samba 4.15")
+    w.add_service("10.0.0.5", 80, name="http", version="nginx 1.25")
+    w.add_credential(Credential(kind="password", principal="CORP\\admin", secret="p@ss"))
+    w.mark_technique("10.0.0.5", "smb", "smb-brute", status="tried", port=445)
+    w.add_evidence({"phase": "execute", "technique": "smb-brute", "host": "10.0.0.5",
+                    "raw": "NT_STATUS_LOGON_FAILURE pour admin"})
+    ctx = _author_context(w, "smb")
+    assert "445" in ctx and "Samba 4.15" in ctx          # version + port du service visé
+    assert "http" in ctx                                  # service voisin
+    assert "CORP\\admin" in ctx and "p@ss" not in ctx     # principal oui, secret non
+    assert "smb-brute" in ctx and "LOGON_FAILURE" in ctx  # échec tenté + extrait du résultat
+
+
+def test_author_context_tronque_les_sorties_longues():
+    from orchestrator import _author_context
+    w = WorldModel(scope=Scope.from_lines(["10.0.0.0/24"]))
+    w.add_service("10.0.0.5", 445, name="smb")
+    w.mark_technique("10.0.0.5", "smb", "t", status="tried", port=445)
+    # long mais à basse entropie (espaces) pour tester la troncature, pas le masquage
+    w.add_evidence({"phase": "execute", "technique": "t", "host": "10.0.0.5", "raw": "echec " * 1000})
+    ctx = _author_context(w, "smb")
+    assert "echec echec" in ctx        # début de l'extrait présent
+    assert ctx.count("echec") < 60     # tronqué (pas les 1000 occurrences)
+
+
+def test_author_context_masks_high_entropy_unknown_hash():
+    from orchestrator import _author_context
+    w = WorldModel(scope=Scope.from_lines(["10.0.0.0/24"]))
+    w.add_service("10.0.0.5", 445, name="smb")
+    w.mark_technique("10.0.0.5", "smb", "dump", status="tried", port=445)
+    # hash NT inconnu (jamais reconcilié en Credential) dans la sortie brute
+    w.add_evidence({"phase": "execute", "technique": "dump", "host": "10.0.0.5",
+                    "raw": "Administrator ::: 31d6cfe0d16ae931b73c59d7e0c089c0 :::"})
+    ctx = _author_context(w, "smb")   # aucun credential connu -> masquage par entropie
+    assert "31d6cfe0d16ae931b73c59d7e0c089c0" not in ctx
+    assert "***" in ctx
+
+
+def test_author_context_redacts_known_secret():
+    from orchestrator import _author_context
+    w = WorldModel(scope=Scope.from_lines(["10.0.0.0/24"]))
+    w.add_service("10.0.0.5", 445, name="smb")
+    w.add_credential(Credential(kind="password", principal="admin", secret="Summer2024!"))
+    w.mark_technique("10.0.0.5", "smb", "smb-brute", status="tried", port=445)
+    w.add_evidence({"phase": "execute", "technique": "smb-brute", "host": "10.0.0.5",
+                    "raw": "admin:Summer2024! (valid session)"})
+    ctx = _author_context(w, "smb")
+    assert "Summer2024!" not in ctx   # secret connu expurgé de l'extrait envoyé au LLM
+    assert "***" in ctx               # marqueur de rédaction présent
 
 
 def test_integrate_captures_raw_evidence():
@@ -90,6 +152,28 @@ def test_render_template_fills_target_and_port():
     import orchestrator as orch
     assert orch._render_template("x http://{target}:{port}/", "127.0.0.1", 8080) == "x http://127.0.0.1:8080/"
     assert orch._render_template("", "127.0.0.1", 80) == ""
+
+
+def test_render_template_substitutes_credential_fields():
+    import orchestrator as orch
+    from state.world_model import Credential
+    creds = [Credential(kind="hash", principal="CORP\\admin", secret="aad3b:deadbeef", source="t")]
+    out = orch._render_template("evil-winrm -i {target} -u {user} -H {hash}", "127.0.0.1", creds=creds)
+    assert out == "evil-winrm -i 127.0.0.1 -u admin -H aad3b:deadbeef"
+
+
+def test_render_template_domain_from_principal():
+    import orchestrator as orch
+    from state.world_model import Credential
+    creds = [Credential(kind="password", principal="user@corp.local", secret="P@ss", source="t")]
+    out = orch._render_template("cmd {user} {domain} {password}", "127.0.0.1", creds=creds)
+    assert out == "cmd user corp.local P@ss"
+
+
+def test_render_template_unknown_placeholder_returns_raw():
+    import orchestrator as orch
+    # Pas de cred : {user} inconnu -> gabarit brut (contrat Projet 1 inchange).
+    assert orch._render_template("x {user}", "127.0.0.1") == "x {user}"
 
 
 def _patch_fake_agent(monkeypatch):
@@ -303,3 +387,255 @@ def test_node_integrate_persists_world_each_cycle(tmp_path, monkeypatch):
     state = {"execution_reports": [], "cycle": 0, "thread_id": "mX"}
     orch.node_integrate(state, {"configurable": {"thread_id": "mX"}})
     assert (tmp_path / "mX" / "world.json").exists()
+
+
+def test_requires_session_needs_authorized_session():
+    import orchestrator as orch
+    from state.world_model import Session
+    wm = WorldModel(scope=Scope.from_lines(["127.0.0.1/32"]))
+    wm.add_session(Session(host="127.0.0.1", channel="evil-winrm", authorized=False))
+    assert orch._requires_satisfied(wm, "127.0.0.1", "smb", {"session"}) is False
+    assert orch.authorize_sessions(wm, "127.0.0.1") == 1
+    assert orch._requires_satisfied(wm, "127.0.0.1", "smb", {"session"}) is True
+
+
+def test_authorize_sessions_counts_only_unauthorized_alive():
+    import orchestrator as orch
+    from state.world_model import Session
+    wm = WorldModel(scope=Scope.from_lines(["127.0.0.1/32"]))
+    wm.add_session(Session(host="127.0.0.1", channel="ssh", authorized=True))
+    wm.add_session(Session(host="127.0.0.1", channel="x", alive=False))
+    assert orch.authorize_sessions(wm, "127.0.0.1") == 0
+
+
+def test_node_execute_runs_offensive_technique_deterministically(monkeypatch, tmp_path):
+    import orchestrator as orch
+    from state import mission_io
+    from catalog.loader import Technique
+    monkeypatch.setattr(mission_io, "MISSIONS_ROOT", tmp_path)
+    # agent = bombe : s'il est appelé sur une technique offensive, le test échoue
+    def _boom(*a, **k): raise AssertionError("agent ne doit pas exécuter une technique offensive")
+    monkeypatch.setattr("agents.dynamic_agent.build_task_agent", _boom)
+    tech = Technique(id="llm.win", name="n", domain="ad", service="smb", requires=set(),
+                     tool="crackmapexec", command_template="crackmapexec smb {target} -u {user} -H {hash}",
+                     success_signal="Pwn3d", provided_by="llm", opens_session=True)
+    monkeypatch.setattr(orch, "_CATALOG", [tech])
+    monkeypatch.setattr(orch, "technique_available", lambda t: True)
+    monkeypatch.setattr("offense.executor.execute_command",
+                        lambda rendered, **kw: ("done", "STATUS ... (Pwn3d!) ..."))
+    wm = WorldModel(scope=Scope.from_lines(["127.0.0.1/32"]))
+    wm.add_service("127.0.0.1", 445, name="smb")
+    wm.add_credential(Credential(kind="hash", principal="admin", secret="h", source="t"))
+    orch._MISSIONS["t_off"] = wm
+    cfg = {"configurable": {"thread_id": "t_off"}}
+    planned = plan_tasks(wm, orch._CATALOG)
+    reports = orch.node_execute({"planned": planned, "rag_context": ""}, cfg)["execution_reports"]
+    assert any(r["status"] == "done" and r["technique"] == "llm.win" for r in reports)
+    assert any(s.host == "127.0.0.1" and s.authorized is False for s in wm.sessions)
+
+
+def test_propose_only_skips_llm_execution(monkeypatch, tmp_path):
+    import orchestrator as orch
+    from state import mission_io
+    from catalog.loader import Technique
+    monkeypatch.setattr(mission_io, "MISSIONS_ROOT", tmp_path)
+    monkeypatch.setattr("offense.executor.execute_command",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("ne doit pas exécuter")))
+    tech = Technique(id="llm.x", name="n", domain="ad", service="smb", requires=set(),
+                     tool="cme", command_template="cme smb {target}", success_signal="ok",
+                     provided_by="llm")
+    monkeypatch.setattr(orch, "_CATALOG", [tech])
+    monkeypatch.setattr(orch, "technique_available", lambda t: True)
+    orch.set_propose_only(True)
+    try:
+        wm = WorldModel(scope=Scope.from_lines(["127.0.0.1/32"]))
+        wm.add_service("127.0.0.1", 445, name="smb"); orch._MISSIONS["t_po"] = wm
+        cfg = {"configurable": {"thread_id": "t_po"}}
+        reports = orch.node_execute({"planned": plan_tasks(wm, orch._CATALOG), "rag_context": ""}, cfg)["execution_reports"]
+        assert any(r["status"] == "proposed_awaiting_operator" for r in reports)
+    finally:
+        orch.set_propose_only(False)
+
+
+def test_dry_services_detects_service_without_technique():
+    import orchestrator as orch
+    wm = WorldModel(scope=Scope.from_lines(["127.0.0.1/32"]))
+    wm.add_service("127.0.0.1", 9999, name="exotic")   # aucun builtin pour "exotic"
+    assert "exotic" in orch._dry_services(wm, orch._CATALOG, planned=[])
+    wm.add_service("127.0.0.1", 445, name="smb")        # smb a des builtins
+    assert "smb" not in orch._dry_services(wm, orch._CATALOG, planned=plan_tasks(wm, orch._CATALOG))
+
+
+def test_node_execute_skips_unfillable_placeholder_without_executing(monkeypatch, tmp_path):
+    # Un gabarit avec un placeholder non remplissable ({share} sans valeur) NE DOIT PAS
+    # s'exécuter en brut : on remonte blocked_missing_input, l'exécuteur n'est jamais appelé.
+    import orchestrator as orch
+    from state import mission_io
+    from catalog.loader import Technique
+    monkeypatch.setattr(mission_io, "MISSIONS_ROOT", tmp_path)
+    monkeypatch.setattr("offense.executor.execute_command",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            AssertionError("ne doit pas exécuter un gabarit non rendu")))
+    tech = Technique(id="llm.share", name="n", domain="ad", service="smb", requires=set(),
+                     tool="smbclient", command_template="smbclient //{target}/{share} -U {user}",
+                     success_signal="ok", provided_by="llm")
+    monkeypatch.setattr(orch, "_CATALOG", [tech])
+    monkeypatch.setattr(orch, "technique_available", lambda t: True)
+    wm = WorldModel(scope=Scope.from_lines(["127.0.0.1/32"]))
+    wm.add_service("127.0.0.1", 445, name="smb")
+    wm.add_credential(Credential(kind="password", principal="admin", secret="x", source="t"))
+    orch._MISSIONS["t_share"] = wm
+    cfg = {"configurable": {"thread_id": "t_share"}}
+    planned = plan_tasks(wm, orch._CATALOG)
+    reports = orch.node_execute({"planned": planned, "rag_context": ""}, cfg)["execution_reports"]
+    r = next(r for r in reports if r["technique"] == "llm.share")
+    assert r["status"] == "blocked_missing_input" and "share" in r["detail"]
+
+
+def test_node_execute_blocks_out_of_scope_literal_ip(monkeypatch, tmp_path):
+    # Un hôte LITTÉRAL hors périmètre dans le gabarit (opérateur/LLM) est bloqué AVANT
+    # exécution (contrôle sur le gabarit), l'exécuteur n'est jamais appelé.
+    import orchestrator as orch
+    from state import mission_io
+    from catalog.loader import Technique
+    monkeypatch.setattr(mission_io, "MISSIONS_ROOT", tmp_path)
+    monkeypatch.setattr("offense.executor.execute_command",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            AssertionError("ne doit pas exécuter une technique hors périmètre")))
+    tech = Technique(id="op.x", name="n", domain="network", service="smb", requires=set(),
+                     tool="nmap", command_template="nmap -sV {target} 10.0.0.9",
+                     success_signal="open", provided_by="operator")
+    monkeypatch.setattr(orch, "_CATALOG", [tech])
+    monkeypatch.setattr(orch, "technique_available", lambda t: True)
+    wm = WorldModel(scope=Scope.from_lines(["127.0.0.1/32"]))
+    wm.add_service("127.0.0.1", 445, name="smb")
+    orch._MISSIONS["t_oos"] = wm
+    cfg = {"configurable": {"thread_id": "t_oos"}}
+    planned = plan_tasks(wm, orch._CATALOG)
+    reports = orch.node_execute({"planned": planned, "rag_context": ""}, cfg)["execution_reports"]
+    r = next(r for r in reports if r["technique"] == "op.x")
+    assert r["status"] == "blocked_out_of_scope" and "10.0.0.9" in r["detail"]
+
+
+def test_node_execute_blocks_out_of_scope_hostname_resolving(monkeypatch, tmp_path):
+    # Un NOM D'HÔTE littéral est résolu puis contrôlé à l'exécution (modèle "résous + report").
+    import orchestrator as orch
+    import scope
+    from state import mission_io
+    from catalog.loader import Technique
+    monkeypatch.setattr(mission_io, "MISSIONS_ROOT", tmp_path)
+    monkeypatch.setattr(scope.socket, "gethostbyname",
+                        lambda n: "203.0.113.9" if n == "evil.example.com" else (_ for _ in ()).throw(OSError()))
+    monkeypatch.setattr("offense.executor.execute_command",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("ne doit pas exécuter")))
+    tech = Technique(id="op.h", name="n", domain="network", service="smb", requires=set(),
+                     tool="nmap", command_template="nmap -sV {target} evil.example.com",
+                     success_signal="open", provided_by="operator")
+    monkeypatch.setattr(orch, "_CATALOG", [tech])
+    monkeypatch.setattr(orch, "technique_available", lambda t: True)
+    wm = WorldModel(scope=Scope.from_lines(["10.0.0.0/24"]))
+    wm.add_service("10.0.0.5", 445, name="smb")
+    orch._MISSIONS["t_h"] = wm
+    cfg = {"configurable": {"thread_id": "t_h"}}
+    reports = orch.node_execute({"planned": plan_tasks(wm, orch._CATALOG), "rag_context": ""},
+                                cfg)["execution_reports"]
+    r = next(r for r in reports if r["technique"] == "op.h")
+    assert r["status"] == "blocked_out_of_scope" and "evil.example.com" in r["detail"]
+
+
+def test_node_integrate_marks_missing_input_tried(monkeypatch, tmp_path):
+    # blocked_missing_input est marqué 'tried' (boucle-sûr : pas de replanification infinie).
+    import orchestrator as orch
+    from state import mission_io
+    monkeypatch.setattr(mission_io, "MISSIONS_ROOT", tmp_path)
+    wm = WorldModel(scope=Scope.from_lines(["127.0.0.1/32"]))
+    wm.add_service("127.0.0.1", 445, name="smb")
+    orch._MISSIONS["t_mi"] = wm
+    cfg = {"configurable": {"thread_id": "t_mi"}}
+    reports = [{"technique": "llm.share", "host": "127.0.0.1", "service": "smb", "port": 445,
+                "inputs_fp": "", "status": "blocked_missing_input", "detail": "manque {share}"}]
+    orch.node_integrate({"planned": [], "execution_reports": reports, "cycle": 0}, cfg)
+    assert wm.is_tried("127.0.0.1", "smb", "llm.share", inputs_fp="", port=445) is True
+
+
+def test_blocked_no_netns_escalates_and_is_not_marked_tried(monkeypatch, tmp_path):
+    # Périmètre réseau absent : la technique n'est PAS grillée (replanifiable après
+    # `offense.netns up`), l'opérateur est prévenu, et le message d'erreur — qui cite
+    # des adresses — n'alimente pas le modèle du monde.
+    import orchestrator as orch
+    from state import mission_io
+    monkeypatch.setattr(mission_io, "MISSIONS_ROOT", tmp_path)
+    wm = WorldModel(scope=Scope.from_lines(["10.0.0.0/24"]))
+    wm.add_service("10.0.0.5", 445, name="smb")
+    orch._MISSIONS["t_nn"] = wm
+    cfg = {"configurable": {"thread_id": "t_nn"}}
+    reports = [{"technique": "op.n", "host": "10.0.0.5", "service": "smb", "port": 445,
+                "inputs_fp": "", "status": "blocked_no_netns",
+                "detail": "Le périmètre réseau installé (10.0.0.77) ne correspond pas"}]
+    out = orch.node_integrate({"planned": [], "execution_reports": reports, "cycle": 0}, cfg)
+    assert wm.is_tried("10.0.0.5", "smb", "op.n", inputs_fp="", port=445) is False
+    assert out["netns_missing"] is True
+    assert "sudo python -m offense.netns up" in out["final_response"]
+    assert "10.0.0.77" not in wm.hosts
+
+
+def test_no_netns_through_node_execute_then_integrate(monkeypatch, tmp_path):
+    # Même contrat, de bout en bout : le statut de l'exécuteur traverse node_execute
+    # tel quel, et node_integrate ne grille pas la technique.
+    import orchestrator as orch
+    from state import mission_io
+    from catalog.loader import Technique
+    monkeypatch.setattr(mission_io, "MISSIONS_ROOT", tmp_path)
+    monkeypatch.setattr("offense.executor.execute_command",
+                        lambda rendered, **kw: ("blocked_no_netns", "namespace absent"))
+    tech = Technique(id="op.n", name="n", domain="network", service="smb", requires=set(),
+                     tool="nmap", command_template="nmap -sV {target}",
+                     success_signal="open", provided_by="operator")
+    monkeypatch.setattr(orch, "_CATALOG", [tech])
+    monkeypatch.setattr(orch, "technique_available", lambda t: True)
+    wm = WorldModel(scope=Scope.from_lines(["127.0.0.1/32"]))
+    wm.add_service("127.0.0.1", 445, name="smb")
+    orch._MISSIONS["t_nn3"] = wm
+    cfg = {"configurable": {"thread_id": "t_nn3"}}
+    planned = plan_tasks(wm, orch._CATALOG)
+    reports = orch.node_execute({"planned": planned, "rag_context": ""}, cfg)["execution_reports"]
+    assert [r["status"] for r in reports if r["technique"] == "op.n"] == ["blocked_no_netns"]
+    out = orch.node_integrate({"planned": planned, "execution_reports": reports, "cycle": 0}, cfg)
+    assert out["netns_missing"] is True
+    assert wm.is_tried("127.0.0.1", "smb", "op.n", inputs_fp="", port=445) is False
+    assert plan_tasks(wm, orch._CATALOG)          # toujours replanifiable après `up`
+
+
+def test_node_integrate_clears_netns_missing_when_nothing_blocked(monkeypatch, tmp_path):
+    import orchestrator as orch
+    from state import mission_io
+    monkeypatch.setattr(mission_io, "MISSIONS_ROOT", tmp_path)
+    wm = WorldModel(scope=Scope.from_lines(["10.0.0.0/24"]))
+    orch._MISSIONS["t_nn2"] = wm
+    out = orch.node_integrate({"planned": [], "execution_reports": [], "cycle": 0,
+                               "netns_missing": True}, {"configurable": {"thread_id": "t_nn2"}})
+    assert out["netns_missing"] is False
+
+
+def test_route_finishes_when_only_netns_blocked_tasks_remain(monkeypatch):
+    # Sans périmètre réseau, les techniques operator/llm ne sont pas exécutables :
+    # la boucle ne tourne pas à vide jusqu'au cap de cycles.
+    import orchestrator as orch
+    from catalog.loader import Technique
+    tech = Technique(id="op.n", name="n", domain="network", service="smb", requires=set(),
+                     tool="nmap", command_template="nmap -sV {target}",
+                     success_signal="open", provided_by="operator")
+    monkeypatch.setattr(orch, "_CATALOG", [tech])
+    monkeypatch.setattr(orch, "technique_available", lambda t: True)
+    wm = WorldModel(scope=Scope.from_lines(["127.0.0.1/32"]))
+    wm.add_service("127.0.0.1", 445, name="smb")
+    orch._MISSIONS["t_route_netns"] = wm
+    base = {"cycle": 1, "max_cycles": 6, "thread_id": "t_route_netns"}
+    assert route_after_integrate(base) == "continue"
+    assert route_after_integrate({**base, "netns_missing": True}) == "finish"
+
+
+def test_netns_missing_is_a_declared_state_channel():
+    # LangGraph n'accepte en sortie de nœud que les clés déclarées dans l'état.
+    import orchestrator as orch
+    assert "netns_missing" in orch.MissionState.__annotations__

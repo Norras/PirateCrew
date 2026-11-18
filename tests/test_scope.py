@@ -89,3 +89,41 @@ def test_hosts_excludes_network_and_broadcast():
 
 def test_hosts_respects_max_hosts():
     assert len(Scope.from_lines(["10.0.0.0/8"]).hosts(max_hosts=5)) == 5
+
+
+def test_resolution_cache_avoids_second_dns(monkeypatch):
+    # Résolution mise en cache par mission : un même nom n'est résolu qu'une fois.
+    set_active_scope(Scope.from_lines(["10.0.0.0/24"]))
+    calls = []
+    def fake(name):
+        calls.append(name)
+        return "10.0.0.5"
+    monkeypatch.setattr(scope.socket, "gethostbyname", fake)
+    assert assert_in_scope("host.lab") == "10.0.0.5"
+    assert assert_in_scope("host.lab") == "10.0.0.5"
+    assert calls == ["host.lab"]
+
+
+def test_set_active_scope_clears_resolution_cache(monkeypatch):
+    # Une nouvelle mission (nouveau périmètre) vide le cache : pas de résolution périmée.
+    set_active_scope(Scope.from_lines(["10.0.0.0/24"]))
+    monkeypatch.setattr(scope.socket, "gethostbyname", lambda n: "10.0.0.5")
+    assert assert_in_scope("host.lab") == "10.0.0.5"
+    set_active_scope(Scope.from_lines(["10.0.0.0/24"]))
+    monkeypatch.setattr(scope.socket, "gethostbyname", lambda n: "10.0.0.9")
+    assert assert_in_scope("host.lab") == "10.0.0.9"
+
+
+def test_resolution_times_out_fail_closed(monkeypatch):
+    # Résolveur lent/bloqué -> borné par un timeout -> non résolu -> hors périmètre (fail-closed).
+    import time
+    set_active_scope(Scope.from_lines(["10.0.0.0/24"]))
+    monkeypatch.setattr(scope, "_DNS_TIMEOUT", 0.2)
+    def slow(name):
+        time.sleep(3)
+        return "10.0.0.5"
+    monkeypatch.setattr(scope.socket, "gethostbyname", slow)
+    start = time.monotonic()
+    with pytest.raises(ScopeError):
+        assert_in_scope("slow.lab")
+    assert time.monotonic() - start < 2.0
