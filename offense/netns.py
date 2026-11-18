@@ -127,7 +127,8 @@ def loopback_warning(scope: Scope) -> str | None:
         return None
     return (f"[NETNS] Attention : {', '.join(entries)} désigne la boucle locale. Dans le "
             "namespace, c'est celle du namespace (vide) et non celle de cette machine : "
-            "le chemin offensif ne peut pas joindre ses services locaux.")
+            "le chemin offensif ne peut pas joindre ses services locaux. Pour un lab local, "
+            "donnez à la cible sa propre adresse : « sudo python -m offense.lab up ».")
 
 
 def _element(net: ipaddress.IPv4Network) -> str:

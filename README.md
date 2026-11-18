@@ -83,10 +83,28 @@ sudo python -m offense.netns down
 - **Un périmètre `127.0.0.1` est donc injoignable par ce chemin** : dans le namespace, la
   boucle locale est celle du namespace, vide. `up` et la porte de mission l'annoncent
   (`[NETNS] Attention : …`). La reconnaissance et les outils builtin, eux, atteignent
-  toujours `127.0.0.1`. Pour un lab local, donnez à la cible sa propre adresse (conteneur,
-  VM, autre namespace) et mettez cette adresse dans `scope.txt`.
+  toujours `127.0.0.1`. Pour un lab local, donnez à la cible sa propre adresse — voir
+  [Lab local](#lab-local) ci-dessous.
 - Le lien interne hôte ↔ namespace utilise `100.127.77.0/30` (plage partagée des
   opérateurs, hors plages privées) : seul un périmètre qui chevauche cette plage est refusé.
+
+#### Lab local
+
+Pour s'exercer sur un service qui tourne sur la machine elle-même, lancez-le dans un second
+namespace (`pc-lab`) qui a sa propre adresse, `192.0.2.2` (plage de documentation, jamais
+routée sur Internet) :
+
+```bash
+sudo python -m offense.lab up                                   # crée la cible 192.0.2.2
+sudo python -m offense.lab run -- python3 -m http.server 8000   # votre service, au premier plan
+# dans scope.txt : 192.0.2.2   puis : sudo python -m offense.netns up
+sudo python -m offense.lab down
+```
+
+`run` lance la commande avec **vos** privilèges ; Ctrl-C l'arrête. La reconnaissance (depuis
+la machine) et le chemin offensif (depuis `pc-offense`, à travers le filtre) atteignent tous
+deux `192.0.2.2` ; les services locaux de la machine restent hors d'atteinte du chemin
+offensif. Le lab ne sépare que le réseau du service, pas ses fichiers.
 
 Limites connues :
 
