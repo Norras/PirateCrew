@@ -44,9 +44,33 @@ def test_setup_orders_and_disables_v6():
     assert cmds[-1] == ["sysctl", "-w", "net.ipv4.ip_forward=1"]
 
 
-def test_teardown():
-    assert netns.teardown_commands() == [["ip", "netns", "del", "pc-offense"],
+def test_teardown_cuts_the_link_first():
+    # Le veth hôte est supprimé EN PREMIER : `ip netns del` ne détruit pas un
+    # namespace qu'un processus occupe encore, et retirer la table nftables
+    # pendant que ce lien existe le laisserait transiter sans filtre.
+    assert netns.teardown_commands() == [["ip", "link", "del", "pc-host"],
+                                         ["ip", "netns", "del", "pc-offense"],
                                          ["nft", "delete", "table", "inet", "piratecrew"]]
+
+
+def test_helper_script_is_hardened():
+    lines = netns.HELPER_SCRIPT.splitlines()
+    commands = [l for l in lines if l and not l.startswith("#")]
+    # PATH fixé avant toute commande : le script tourne en root via sudo et ne
+    # doit pas résoudre nft/ip/setpriv dans le PATH de l'appelant.
+    assert commands[:3] == ["set -eu", "PATH=/usr/sbin:/usr/bin:/sbin:/bin", "export PATH"]
+    script = netns.HELPER_SCRIPT
+    # Garde commune aux deux modes (--check et exécution), avant tout `exec`.
+    guard_end = script.index('if [ "${1:-}" = "--check" ]')
+    assert "/run/netns/pc-offense" in script[:guard_end]
+    assert "list chain inet piratecrew forward" in script[:guard_end]
+    assert "list chain inet piratecrew input" in script[:guard_end]
+    assert "exec " not in script[:guard_end]
+    assert "export HOME USER LOGNAME" in script
+    # WSL2 : l'interop Windows (sockets de /run/WSL) est masquée AVANT la
+    # descente de privilèges — sinon `curl.exe` s'exécuterait hors du namespace.
+    assert "tmpfs /run/WSL" in script
+    assert script.index("tmpfs /run/WSL") < script.index("setpriv --reuid")
 
 
 # --------------------------------------------------------------------------- #
@@ -100,7 +124,8 @@ def test_up_loads_nft_before_creating_namespace(fake_run, fake_write):
 
 def test_up_is_idempotent_teardown_first(fake_run, fake_write):
     netns.up(Scope.from_lines(["10.0.0.0/24"]), run=fake_run, write=fake_write)
-    assert [c[0] for c in fake_run.calls][:2] == netns.teardown_commands()
+    teardown = netns.teardown_commands()
+    assert [c[0] for c in fake_run.calls][:len(teardown)] == teardown
 
 
 def test_up_survives_failing_initial_teardown(fake_write):
@@ -153,7 +178,8 @@ def test_up_failure_tears_down(fake_write):
     run = _FakeRun(fail_on=["ip", "link", "add"])
     with pytest.raises(netns.NetnsError, match="ip link add"):
         netns.up(Scope.from_lines(["10.0.0.0/24"]), run=run, write=fake_write)
-    assert [c[0] for c in run.calls][-2:] == netns.teardown_commands()
+    teardown = netns.teardown_commands()
+    assert [c[0] for c in run.calls][-len(teardown):] == teardown
     assert fake_write.calls == []
 
 
@@ -217,6 +243,9 @@ def test_installed_networks_empty_set_is_empty_list(linux):
     '{"nftables":[{"set":{"elem":[{"weird":1}]}}]}',
     '{"nftables":[{"set":{"elem":["pas-une-ip"]}}]}',
     '{"nftables":[{"set":{"elem":[{"prefix":{"addr":"10.0.0.0"}}]}}]}',
+    '{"nftables":[{"set":"pas-un-objet"}]}',
+    '{"nftables":[{"set":{"elem":"pas-une-liste"}}]}',
+    '{"nftables":[{"set":{"elem":[{"range":["10.0.0.9","10.0.0.1"]}]}}]}',
 ])
 def test_installed_networks_fail_closed_on_unexpected_output(linux, out):
     with pytest.raises(netns.NetnsError):
@@ -263,7 +292,9 @@ def test_verify_refuses_off_linux_without_spawning(monkeypatch):
 
 def test_wrap_by_euid(monkeypatch):
     monkeypatch.setattr(netns.os, "geteuid", lambda: 1000, raising=False)
-    assert netns.wrap(["nmap", "x"]) == ["sudo", "-n", "/usr/local/sbin/pc-netns-exec", "nmap", "x"]
+    # Chemin absolu : `sudo` ne doit pas être résolu dans un PATH qui commence
+    # par un répertoire inscriptible par l'utilisateur (venv/bin).
+    assert netns.wrap(["nmap", "x"]) == ["/usr/bin/sudo", "-n", "/usr/local/sbin/pc-netns-exec", "nmap", "x"]
     monkeypatch.setattr(netns.os, "geteuid", lambda: 0, raising=False)
     assert netns.wrap(["nmap", "x"]) == ["/usr/local/sbin/pc-netns-exec", "nmap", "x"]
 
@@ -277,7 +308,39 @@ def test_run_isolated_requires_scope_and_verify(monkeypatch):
     monkeypatch.setattr(netns, "verify", lambda scope, run=None: None)
     monkeypatch.setattr(netns, "wrap", lambda argv: ["W", *argv])
     monkeypatch.setattr("tools.registry._run", lambda argv, timeout=120: seen.append((argv, timeout)) or "ok")
-    assert netns.run_isolated(["id"], timeout=7) == "ok" and seen == [(["W", "id"], 7)]
+    monkeypatch.setenv("PATH", "/opt/outils:/usr/bin")
+    assert netns.run_isolated(["id"], timeout=7) == "ok"
+    # - `env PATH=…` : sudo remet l'environnement à zéro ; l'outil doit être trouvé
+    #   dans le PATH de la mission (venv/bin, ~/.local/bin), comme technique_available.
+    # - `timeout -k 5 7` : le délai est appliqué APRÈS la descente de privilèges ;
+    #   un processus non root ne peut pas tuer `sudo` (EPERM), donc pas le subprocess.
+    # - délai externe 7 + 15 : simple filet, il ne doit jamais se déclencher en premier.
+    assert seen == [(["W", "env", "PATH=/opt/outils:/usr/bin", "timeout", "-k", "5", "7", "id"], 22)]
+
+
+def test_run_isolated_path_fallback_when_unset(monkeypatch):
+    from scope import set_active_scope
+    seen = []
+    set_active_scope(Scope.from_lines(["10.0.0.0/24"]))
+    monkeypatch.setattr(netns, "verify", lambda scope, run=None: None)
+    monkeypatch.setattr(netns, "wrap", lambda argv: argv)
+    monkeypatch.setattr("tools.registry._run", lambda argv, timeout=120: seen.append(argv) or "ok")
+    monkeypatch.delenv("PATH", raising=False)
+    netns.run_isolated(["id"])
+    assert seen[0][1] == "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+
+def test_run_isolated_helper_refusal_is_not_a_tool_result(monkeypatch):
+    # Le script d'aide a refusé (namespace ou filtre disparu entre la vérification
+    # et l'exécution) : c'est un blocage, pas une sortie d'outil — sinon la
+    # technique serait marquée « tentée » alors que rien n'a tourné.
+    from scope import set_active_scope
+    set_active_scope(Scope.from_lines(["10.0.0.0/24"]))
+    monkeypatch.setattr(netns, "verify", lambda scope, run=None: None)
+    monkeypatch.setattr("tools.registry._run",
+                        lambda argv, timeout=120: "pc-netns-exec: namespace pc-offense absent")
+    with pytest.raises(netns.NetnsError, match="namespace pc-offense absent.*offense.netns up"):
+        netns.run_isolated(["id"])
 
 
 def test_run_isolated_does_not_run_when_verify_fails(monkeypatch):

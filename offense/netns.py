@@ -46,22 +46,53 @@ _SUDO_USER_RE = re.compile(r"^[a-z_][a-z0-9_-]*$")
 # Script d'aide installé en root par `up`. C'est la SEULE commande que la règle
 # sudoers autorise : il entre dans le namespace puis redescend à l'utilisateur
 # appelant (setpriv) avant d'exécuter — aucune exécution root n'est accordée.
-# Il refuse d'exécuter si la table nftables a disparu (code 97).
+#
+# - PATH est fixé d'entrée : le script tourne en root, il ne doit pas résoudre
+#   nft/ip/setpriv dans le PATH de l'appelant (sudoers sans secure_path).
+# - La garde vaut pour les DEUX modes (--check et exécution) : namespace présent
+#   (code 96) et règles de blocage présentes dans les chaînes forward et input
+#   (code 97). Vérifier le seul contenu du set ne suffit pas : un
+#   `nft flush table` garde le set mais vide les chaînes (policy accept).
+# - Après la descente de privilèges, HOME/USER/LOGNAME sont ceux de l'appelant
+#   (sudo les a remis à zéro) ; le PATH de l'outil est passé par `run_isolated`.
+# - WSL2 : un binaire Windows (curl.exe…) lancé depuis Linux s'exécute côté
+#   Windows, hors de tout namespace réseau. L'interop passe par des sockets
+#   sous /run/WSL : elles sont masquées par un tmpfs vide, dans le namespace de
+#   montage privé que crée `ip netns exec` (rien ne change pour le reste du
+#   système), avant la descente de privilèges. Masquage impossible : code 98.
 HELPER_SCRIPT = """#!/bin/sh
 # Installé par `python -m offense.netns up`. Ne pas modifier à la main.
 set -eu
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+refuse() {
+    echo "pc-netns-exec: $1" >&2
+    exit "$2"
+}
+[ -e /run/netns/pc-offense ] || refuse "namespace pc-offense absent" 96
+nft list chain inet piratecrew forward 2>/dev/null | grep -Eq 'iifname "pc-host" counter .*drop' || refuse "filtre nft piratecrew absent ou incomplet" 97
+nft list chain inet piratecrew input 2>/dev/null | grep -Eq 'iifname "pc-host" drop' || refuse "filtre nft piratecrew absent ou incomplet" 97
 if [ "${1:-}" = "--check" ]; then
     exec nft -j list set inet piratecrew scope4
 fi
-nft list table inet piratecrew >/dev/null 2>&1 || {
-    echo "pc-netns-exec: table nft piratecrew absente" >&2
-    exit 97
-}
 uid="${SUDO_UID:-0}"
 gid="${SUDO_GID:-0}"
+USER="$(getent passwd "$uid" | cut -d: -f1)"
 HOME="$(getent passwd "$uid" | cut -d: -f6)"
-export HOME
-exec ip netns exec pc-offense setpriv --reuid "$uid" --regid "$gid" --init-groups -- "$@"
+LOGNAME="$USER"
+export HOME USER LOGNAME
+exec ip netns exec pc-offense /bin/sh -c '
+uid="$1"
+gid="$2"
+shift 2
+if [ -d /run/WSL ]; then
+    mount -t tmpfs -o ro,nosuid,nodev,noexec tmpfs /run/WSL || {
+        echo "pc-netns-exec: interop WSL non masquable" >&2
+        exit 98
+    }
+fi
+exec setpriv --reuid "$uid" --regid "$gid" --init-groups -- "$@"
+' pc-netns-exec "$uid" "$gid" "$@"
 """
 
 
@@ -144,8 +175,16 @@ def setup_commands() -> list[list[str]]:
 
 
 def teardown_commands() -> list[list[str]]:
-    """Commandes (root) de démontage. Supprimer le namespace supprime la paire veth."""
+    """Commandes (root) de démontage, dans l'ordre.
+
+    Le veth hôte part EN PREMIER. `ip netns del` ne fait que retirer le nom : si
+    une commande tourne encore dans le namespace, celui-ci survit avec son lien.
+    Supprimer une extrémité détruit la paire même dans ce cas — la commande en
+    cours perd le réseau AVANT que la table nftables ne soit retirée, et un `up`
+    suivant ne bute pas sur un `pc-host` résiduel.
+    """
     return [
+        ["ip", "link", "del", HOST_IF],
         ["ip", "netns", "del", NS_NAME],
         ["nft", "delete", "table", "inet", NFT_TABLE],
     ]
@@ -244,6 +283,8 @@ def up(scope: Scope, dns: str | None = None, sudo_user: str | None = None,
 # Entrée dans le namespace et vérification (processus PirateCrew, non root)
 # --------------------------------------------------------------------------- #
 _UP_HINT = "lancez « sudo python -m offense.netns up » puis relancez"
+_DEFAULT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+_HELPER_REFUSAL = "pc-netns-exec:"   # préfixe des refus du script d'aide (stderr)
 
 
 def _is_root() -> bool:
@@ -252,8 +293,10 @@ def _is_root() -> bool:
 
 def wrap(argv: list[str]) -> list[str]:
     """Préfixe `argv` pour l'exécuter dans le namespace via le script d'aide
-    (`sudo -n` si le processus n'est pas root : jamais de demande de mot de passe)."""
-    prefix = [] if _is_root() else ["sudo", "-n"]
+    (`sudo -n` si le processus n'est pas root : jamais de demande de mot de passe).
+    `sudo` est appelé par son chemin absolu : le PATH d'une mission commence
+    souvent par un répertoire inscriptible par l'utilisateur (venv/bin)."""
+    prefix = [] if _is_root() else ["/usr/bin/sudo", "-n"]
     return [*prefix, HELPER_PATH, *argv]
 
 
@@ -295,7 +338,7 @@ def installed_networks(run=None) -> list[ipaddress.IPv4Network]:
         networks: list[ipaddress.IPv4Network] = []
         for elem in sets[0].get("elem", []):
             networks.extend(_element_networks(elem))
-    except (ValueError, KeyError, TypeError) as exc:
+    except (ValueError, KeyError, TypeError, AttributeError) as exc:
         raise NetnsError(f"Sortie nft inattendue ({exc})") from exc
     return sorted(ipaddress.collapse_addresses(networks))
 
@@ -328,7 +371,20 @@ def run_isolated(argv: list[str], timeout: int = 120) -> str:
         raise NetnsError("Aucun périmètre actif : exécution refusée.")
     verify(scope)
     from tools.registry import _run  # lazy : évite un cycle d'import
-    return _run(wrap(argv), timeout)
+    # Ce qui suit s'exécute APRÈS la descente de privilèges du script d'aide :
+    # - `env PATH=…` rend à l'outil le PATH de la mission (sudo l'a remis à zéro),
+    #   celui-là même que `technique_available` a utilisé pour le trouver ;
+    # - `timeout -k 5` applique le délai là où il peut l'être : un processus non
+    #   root ne peut pas tuer `sudo` (EPERM), donc le délai de subprocess seul
+    #   bloquerait la mission. Le délai externe (+15 s) n'est qu'un filet.
+    inner = ["env", f"PATH={os.environ.get('PATH') or _DEFAULT_PATH}",
+             "timeout", "-k", "5", str(int(timeout)), *argv]
+    out = _run(wrap(inner), timeout + 15)
+    if out.startswith(_HELPER_REFUSAL):
+        # Namespace ou filtre disparu entre la vérification et l'exécution : le
+        # script d'aide a refusé, rien n'a tourné — blocage, pas sortie d'outil.
+        raise NetnsError(f"{out} — {_UP_HINT}.")
+    return out
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -88,8 +88,17 @@ Limites connues :
 - connexions entrantes vers le namespace (reverse shell : demanderait un DNAT) ;
 - périmètre IPv6 non appliqué (IPv4 seulement) ;
 - scans à sockets brutes en non-root (`nmap -sS`) : poser `setcap cap_net_raw+ep` sur nmap ;
-- une commande **déjà en cours** quand la table nftables est supprimée n'est plus filtrée
-  (les suivantes sont refusées) ;
+- le namespace confine le **réseau** des processus qu'il lance, pas leurs autres moyens de
+  parler à un processus extérieur : sockets Unix par chemin (`docker.sock`, ControlMaster
+  ssh, serveur tmux, `systemd-run --user`). La commande tourne avec le même utilisateur
+  que PirateCrew ;
+- sous WSL2, l'interop Windows (`curl.exe`, `powershell.exe`… qui s'exécuteraient côté
+  Windows, hors filtre) est **masquée** dans le namespace — vérifié par les tests
+  d'intégration ; elle reste active partout ailleurs ;
+- `sudo` journalise chaque commande rendue, identifiants compris, dans le journal système ;
+- une commande **déjà en cours** n'est plus filtrée si la table nftables est supprimée à la
+  main (`down` coupe d'abord le lien ; les commandes suivantes sont refusées, y compris si
+  les règles sont seulement vidées ou si le namespace a disparu) ;
 - un autre pare-feu en `DROP` sur le transit (Docker, iptables `FORWARD`) peut bloquer des
   cibles in-scope : le symptôme est un timeout, pas une fuite.
 
