@@ -73,8 +73,14 @@ def _validate_target(target: str) -> str:
 
 
 def _run(cmd_list, timeout: int = 120) -> str:
-    """Bounded, audited subprocess.run. Does not raise: returns a message on failure."""
-    _audit("RUN", " ".join(cmd_list))
+    """Bounded, audited subprocess.run. Does not raise: returns a message on failure.
+
+    audit.log gets only the STRUCTURAL fact (which binary ran), never the
+    rendered argv: a tool argument can carry a credential (`smbclient -U u%pass`)
+    or target data, and audit.log is the artifact meant to stay secret-free.
+    """
+    binary = cmd_list[0] if cmd_list else "?"
+    _audit("RUN", binary)
     try:
         proc = subprocess.run(
             cmd_list,
@@ -89,10 +95,23 @@ def _run(cmd_list, timeout: int = 120) -> str:
         return msg
     except subprocess.TimeoutExpired:
         msg = f"Timeout exceeded ({timeout}s) for: {' '.join(cmd_list)}"
-        _audit("TIMEOUT", msg)
+        _audit("TIMEOUT", f"{binary} ({timeout}s)")  # structural only, never the rendered argv
         return msg
     output = ((proc.stdout or "") + (proc.stderr or "")).strip()
     return output or "(no output)"
+
+
+def _audit_url(url: str) -> str:
+    """URL reduced to its structural parts for audit.log — scheme, host, port,
+    path — dropping userinfo (`http://user:pass@…`) and the query/fragment,
+    where a token or credential can hide. audit.log must stay secret-free."""
+    try:
+        parsed = urlparse(url if "://" in (url or "") else "http://" + (url or ""))
+    except ValueError:
+        return "(url)"
+    host = parsed.hostname or ""
+    port = f":{parsed.port}" if parsed.port else ""
+    return f"{parsed.scheme}://{host}{port}{parsed.path or ''}"
 
 
 # --------------------------------------------------------------------------- #
@@ -168,7 +187,7 @@ def http_fingerprint(url: str) -> str:
     parsed = urlparse(url)
     host = parsed.hostname or ""
     ip = _validate_target(host)  # filter + scope; we contact the VERIFIED IP, not the hostname
-    _audit("HTTP_FINGERPRINT", url)
+    _audit("HTTP_FINGERPRINT", _audit_url(url))
     is_https = parsed.scheme == "https"
     conn_cls = http.client.HTTPSConnection if is_https else http.client.HTTPConnection
     port = parsed.port or (443 if is_https else 80)
@@ -204,7 +223,7 @@ def http_get(url: str) -> str:
     parsed = urlparse(url)
     host = parsed.hostname or ""
     ip = _validate_target(host)  # filter + scope; we contact the VERIFIED IP
-    _audit("HTTP_GET", url)
+    _audit("HTTP_GET", _audit_url(url))
     is_https = parsed.scheme == "https"
     conn_cls = http.client.HTTPSConnection if is_https else http.client.HTTPConnection
     port = parsed.port or (443 if is_https else 80)
