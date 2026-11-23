@@ -139,6 +139,7 @@ class WorldModel:
     # Findings
     # ------------------------------------------------------------------ #
     def add_credential(self, cred: Credential) -> Credential:
+        scope.register_secret(cred.secret)  # redacted from every future audit line
         key = (cred.kind, cred.principal, cred.secret)
         for c in self.credentials:
             if (c.kind, c.principal, c.secret) == key:

@@ -73,8 +73,14 @@ def _validate_target(target: str) -> str:
 
 
 def _run(cmd_list, timeout: int = 120) -> str:
-    """Bounded, audited subprocess.run. Does not raise: returns a message on failure."""
-    _audit("RUN", " ".join(cmd_list))
+    """Bounded, audited subprocess.run. Does not raise: returns a message on failure.
+
+    audit.log gets only the STRUCTURAL fact (which binary ran), never the
+    rendered argv: a tool argument can carry a credential (`smbclient -U u%pass`)
+    or target data, and audit.log is the artifact meant to stay secret-free.
+    """
+    binary = cmd_list[0] if cmd_list else "?"
+    _audit("RUN", binary)
     try:
         proc = subprocess.run(
             cmd_list,
@@ -89,7 +95,7 @@ def _run(cmd_list, timeout: int = 120) -> str:
         return msg
     except subprocess.TimeoutExpired:
         msg = f"Timeout exceeded ({timeout}s) for: {' '.join(cmd_list)}"
-        _audit("TIMEOUT", msg)
+        _audit("TIMEOUT", f"{binary} ({timeout}s)")  # structural only, never the rendered argv
         return msg
     output = ((proc.stdout or "") + (proc.stderr or "")).strip()
     return output or "(no output)"

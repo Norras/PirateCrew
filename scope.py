@@ -22,15 +22,51 @@ class ScopeError(Exception):
     """Scope missing or invalid, or target out of scope."""
 
 
+# Known-secret registry, redacted from EVERY audit line. This is exact-substring
+# redaction of secret values the mission actually recorded (e.g. a found
+# credential) — NOT a pattern/heuristic guess of what looks secret, so it does
+# not reopen the frozen host-notation text checks: it is deterministic and
+# bounded by the set of secrets registered. Values shorter than _MIN_SECRET_LEN
+# are ignored to avoid pathological over-redaction of common substrings.
+_SECRETS: set[str] = set()
+_SECRETS_LOCK = threading.Lock()
+_MIN_SECRET_LEN = 4
+
+
+def register_secret(value) -> None:
+    """Record a value so it is redacted from every future audit line.
+
+    Call it wherever a secret becomes known (see state.world_model.add_credential).
+    Idempotent; non-string or too-short values are ignored.
+    """
+    if not isinstance(value, str):
+        return
+    value = value.strip()
+    if len(value) < _MIN_SECRET_LEN:
+        return
+    with _SECRETS_LOCK:
+        _SECRETS.add(value)
+
+
+def _redact_secrets(value: str) -> str:
+    """Replace every registered secret found in `value` with `***`."""
+    with _SECRETS_LOCK:
+        secrets = tuple(_SECRETS)
+    for s in secrets:
+        if s in value:
+            value = value.replace(s, "***")
+    return value
+
+
 def _audit_escape(value: str) -> str:
-    """Neutralize the CR/LF of an audit field.
+    """Sanitize an audit field: redact known secrets, then neutralize CR/LF.
 
     One line per event: a target-controlled value (host, detail, URL) must
-    not be able to forge a fake entry by injecting a line break. Single point
-    of neutralization, shared by scope._audit, tools.registry._audit and
-    state.world_model._trace_out_of_scope.
+    not be able to forge a fake entry by injecting a line break, nor carry a
+    recorded secret. Single point of neutralization, shared by scope._audit,
+    tools.registry._audit and state.world_model._trace_out_of_scope.
     """
-    return str(value).replace("\r", "\\r").replace("\n", "\\n")
+    return _redact_secrets(str(value)).replace("\r", "\\r").replace("\n", "\\n")
 
 
 def _audit(action: str, detail: str = "") -> None:
