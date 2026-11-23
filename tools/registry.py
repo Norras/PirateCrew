@@ -101,6 +101,19 @@ def _run(cmd_list, timeout: int = 120) -> str:
     return output or "(no output)"
 
 
+def _audit_url(url: str) -> str:
+    """URL reduced to its structural parts for audit.log — scheme, host, port,
+    path — dropping userinfo (`http://user:pass@…`) and the query/fragment,
+    where a token or credential can hide. audit.log must stay secret-free."""
+    try:
+        parsed = urlparse(url if "://" in (url or "") else "http://" + (url or ""))
+    except ValueError:
+        return "(url)"
+    host = parsed.hostname or ""
+    port = f":{parsed.port}" if parsed.port else ""
+    return f"{parsed.scheme}://{host}{port}{parsed.path or ''}"
+
+
 # --------------------------------------------------------------------------- #
 # Mandatory tools: audit + scope check
 # --------------------------------------------------------------------------- #
@@ -174,7 +187,7 @@ def http_fingerprint(url: str) -> str:
     parsed = urlparse(url)
     host = parsed.hostname or ""
     ip = _validate_target(host)  # filter + scope; we contact the VERIFIED IP, not the hostname
-    _audit("HTTP_FINGERPRINT", url)
+    _audit("HTTP_FINGERPRINT", _audit_url(url))
     is_https = parsed.scheme == "https"
     conn_cls = http.client.HTTPSConnection if is_https else http.client.HTTPConnection
     port = parsed.port or (443 if is_https else 80)
@@ -210,7 +223,7 @@ def http_get(url: str) -> str:
     parsed = urlparse(url)
     host = parsed.hostname or ""
     ip = _validate_target(host)  # filter + scope; we contact the VERIFIED IP
-    _audit("HTTP_GET", url)
+    _audit("HTTP_GET", _audit_url(url))
     is_https = parsed.scheme == "https"
     conn_cls = http.client.HTTPSConnection if is_https else http.client.HTTPConnection
     port = parsed.port or (443 if is_https else 80)

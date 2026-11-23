@@ -89,3 +89,26 @@ def test_short_value_is_not_registered_to_avoid_over_redaction(_isolate):
     audit = _read(_isolate)
     assert "abcd" in audit
     assert "***" not in audit
+
+
+def test_audit_url_keeps_only_structural_parts():
+    assert reg._audit_url(
+        "http://admin:hunter2@10.10.10.5:8080/dir/f.php?token=abc123&x=1#frag"
+    ) == "http://10.10.10.5:8080/dir/f.php"
+
+
+def test_http_get_audit_drops_userinfo_and_query(_isolate, monkeypatch):
+    scope.set_active_scope(Scope.from_lines(["10.10.10.0/24"]))
+
+    class _Boom:  # no real network in a unit test; the audit line is written before connecting
+        def __init__(self, *a, **k):
+            raise OSError("no network in test")
+
+    monkeypatch.setattr(reg.http.client, "HTTPConnection", _Boom)
+    reg.http_get.invoke({"url": "http://admin:hunter2@10.10.10.5/panel?token=SEKRET123"})
+    audit = _read(_isolate)
+    assert "HTTP_GET" in audit
+    assert "10.10.10.5" in audit and "/panel" in audit   # structural parts kept
+    assert "hunter2" not in audit                        # userinfo dropped
+    assert "SEKRET123" not in audit                      # query token dropped
+    assert "admin:" not in audit
